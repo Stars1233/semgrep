@@ -124,6 +124,23 @@ def is_git_repo_root_approx() -> bool:
     return os.path.exists(".git/")
 
 
+def is_git_repo_empty() -> bool:
+    """
+    Checks if the repo is empty.
+    """
+    # Run git status to cover most common edge cases i.e that the
+    # - Git binary is available
+    # - cwd is a git repository
+    # - cwd is marked safe
+    git_check_output(["git", "status"])
+    try:
+        # This command should only fail in the case that HEAD is empty
+        git_check_output(["git", "rev-parse", "HEAD"])
+        return False
+    except Exception:
+        return True
+
+
 class GitStatus(NamedTuple):
     added: List[Path]
     modified: List[Path]
@@ -259,6 +276,15 @@ class BaselineHandler:
 
             path = Path(fname)
 
+            # Skip the file if it's a broken symlink.
+            # Hypothesis: paths to files that don't exist are possible if the file was renamed,
+            # and they're needed to track semgrep findings in spite of file renames.
+            if path.is_symlink() and not os.access(path, os.R_OK):
+                logger.verbose(
+                    f"| Skipping broken symlink: {path}",
+                )
+                continue
+            # TODO: shouldn't we skip all symlinks?
             if path.is_symlink() and path.is_dir():
                 logger.verbose(
                     f"| Skipping {path} since it is a symlink to a directory: {path.resolve()}",

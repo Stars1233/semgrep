@@ -463,7 +463,7 @@ let all_actions (caps : Cap.all_caps) () =
       Arg_.mk_action_1_conv Fpath.v (fun file ->
           Test_parsing.dump_tree_sitter_cst
             (Xlang.lang_of_opt_xlang_exn !lang)
-            !!file) );
+            file) );
     ( "-dump_tree_sitter_pattern_cst",
       " <file>",
       Arg_.mk_action_1_conv Fpath.v (fun file ->
@@ -532,8 +532,13 @@ let all_actions (caps : Cap.all_caps) () =
       Arg_.mk_action_2_arg (fun a b ->
           Datalog_experiment.gen_facts (Fpath.v a) (Fpath.v b)) );
     ("-test_eval", " <JSON file>", Arg_.mk_action_1_arg Eval_generic.test_eval);
+    ( "-sarif_sort",
+      " <JSON file>",
+      Arg_.mk_action_1_conv Fpath.v Core_actions.sarif_sort );
   ]
-  @ Test_analyze_generic.actions ~parse_program:Parse_target.parse_program
+  @ Test_analyze_generic.actions
+      (caps :> < Cap.exec >)
+      ~parse_program:Parse_target.parse_program
   @ Test_dataflow_tainting.actions ()
   @ Test_naming_generic.actions ~parse_program:Parse_target.parse_program
 
@@ -733,7 +738,7 @@ let register_exception_printers () =
 (* if !Flag.gc_tuning && config.max_memory_mb = 0 then set_gc (); *)
 
 let run caps (config : Core_scan_config.t) : unit =
-  let res = Core_scan.scan (caps :> Core_scan.caps) config in
+  let res = Core_scan.scan caps config in
   output_core_results
     (caps :> < Cap.stdout ; Cap.stderr ; Cap.exit >)
     res config
@@ -829,7 +834,8 @@ let main_exn (caps : Cap.all_caps) (argv : string array) : unit =
           let target_source : Core_scan_config.target_source =
             match (!target_file, !lang, roots) with
             | Some file, None, [] -> Target_file file
-            | None, Some lang, [ file ] when UFile.is_file file ->
+            | None, Some lang, [ file ]
+              when UFile.is_reg ~follow_symlinks:true file ->
                 Targets [ Target.mk_target lang file ]
             | _ ->
                 (* alt: use the file targeting in targets_of_config_DEPRECATED
@@ -853,17 +859,17 @@ let main_exn (caps : Cap.all_caps) (argv : string array) : unit =
           match config.tracing with
           | None -> run caps config
           | Some tracing ->
-              let trace_data =
-                Trace_data.get_top_level_data config.ncores Version.version
-                  (Trace_data.no_analysis_features ())
+              let resource_attrs =
+                (* Let's make sure all traces/logs/metrics etc. are tagged as
+                   coming from the OSS invocation *)
+                Trace_data.get_resource_attrs ?env:tracing.env ~engine:"oss"
+                  ~analysis_flags:(Trace_data.no_analysis_features ())
+                  ~jobs:config.ncores ()
               in
-              Tracing.configure_tracing
-              (* Let's make sure all traces/logs/metrics etc. are tagged as coming from the pro invocation *)
-                ~attrs:[ ("engine", `String "oss") ]
-                ?env:tracing.env ~version:Version.version "semgrep-core"
+              Tracing.configure_tracing ~attrs:resource_attrs "semgrep-core"
                 tracing.endpoint;
-              Tracing.with_tracing "Core_command.semgrep_core_dispatch"
-                trace_data (fun span_id ->
+              Tracing.with_tracing "Core_command.semgrep_core_dispatch" []
+                (fun span_id ->
                   let tracing =
                     { tracing with top_level_span = Some span_id }
                   in

@@ -16,7 +16,7 @@ open Common
 module R = Rule
 module XP = Xpattern
 module MR = Mini_rule
-module PM = Pattern_match
+module PM = Core_match
 module G = AST_generic
 module MV = Metavariable
 module RP = Core_result
@@ -130,8 +130,8 @@ let partition_xpatterns xs =
          | XP.Regexp x -> Stack_.push (Pcre2_.pcre_compile x, pid, str) regexp);
   (List.rev !semgrep, List.rev !spacegrep, List.rev !aliengrep, List.rev !regexp)
 
-let group_matches_per_pattern_id (xs : Pattern_match.t list) :
-    id_to_match_results =
+let group_matches_per_pattern_id (xs : Core_match.t list) : id_to_match_results
+    =
   let h = Hashtbl.create 101 in
   xs
   |> List.iter (fun (m : PM.t) ->
@@ -428,7 +428,7 @@ let apply_focus_on_ranges (env : env) (focus_mvars_list : R.focus_mv_list list)
                validation_state = `No_validator;
                severity_override = None;
                metadata_override = None;
-               dependency = None;
+               sca_match = None;
                fix_text = None;
                facts = [];
              })
@@ -879,7 +879,7 @@ and evaluate_formula env opt_context
       *  - bind closer metavariable-regexp with the relevant pattern
       *  - propagate metavariables when intersecting ranges
       *  - distribute filter_range in intersect_range?
-      * See https://github.com/returntocorp/semgrep/issues/2664
+      * See https://github.com/semgrep/semgrep/issues/2664
   *)
   let ranges, filter_expls =
     fold_with_expls

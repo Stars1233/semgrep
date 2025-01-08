@@ -12,6 +12,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Common
 open Fpath_.Operators
 module OutJ = Semgrep_output_v1_j
 
@@ -109,21 +110,33 @@ let recognise_and_collect ~rex (line_num, line) =
    If [strict:true], we returns possible errors when [nosem] is used with an
    ID which is not equal to the rule's ID.
 *)
-let rule_match_nosem (pm : Pattern_match.t) : bool * Core_error.t list =
+let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
   let path = pm.path.internal_path_to_content in
-  let lines =
+  let lines : (int * string) list =
     (* Minus one, because we need the preceding line. *)
     let start, end_ = pm.range_loc in
+    (* TODO: should be max 0 ... below as lines are 1-based *)
     let start_line = max 0 (start.pos.line - 1) in
-    UFile.lines_of_file (start_line, end_.pos.line) path
-    |> List_.mapi (fun idx x -> (start_line + idx, x))
+    let end_line = end_.pos.line in
+    match UFile.lines_of_file (start_line, end_line) path with
+    | Ok xs -> xs |> List_.mapi (fun idx x -> (start_line + idx, x))
+    | Error err ->
+        (* nosemgrep: no-logs-in-library *)
+        Logs.warn (fun m ->
+            m
+              "error on accessing lines of %s; match was with rule %s; \
+               skipping nosemgrep analysis for this match (error was %s)"
+              !!path
+              (Rule_ID.to_string pm.rule_id.id)
+              err);
+        []
   in
 
   let linecol_to_bytepos_fun =
     (* bugfix: This is only needed in relatively rare cases, and it's costly to
      * compute both in time and memory. Making it lazy avoids this computation
      * when it's not needed. *)
-    lazy (Pos.full_converters_large !!path).linecol_to_bytepos_fun
+    lazy (Pos.full_converters_large path).linecol_to_bytepos_fun
   in
 
   let previous_line, line =
@@ -131,7 +144,8 @@ let rule_match_nosem (pm : Pattern_match.t) : bool * Core_error.t list =
     | line0 :: line1 :: _ when (fst pm.range_loc).pos.line > 0 ->
         (Some line0, Some line1)
     | line :: _ -> (None, Some line)
-    | [] (* XXX(dinosaure): is it possible? *) -> (None, None)
+    (* possible when getting a lines_of_file error above *)
+    | [] -> (None, None)
   in
 
   let no_ids = List.for_all Option.is_none in
@@ -148,10 +162,7 @@ let rule_match_nosem (pm : Pattern_match.t) : bool * Core_error.t list =
         recognise_and_collect ~rex:nosem_previous_line_re previous_line
   in
 
-  match
-    ( Option.value ~default:[] ids_line,
-      Option.value ~default:[] ids_previous_line )
-  with
+  match (ids_line ||| [], ids_previous_line ||| []) with
   | [], [] ->
       (* no lines or no [nosemgrep] occurrences found, keep the [rule_match]. *)
       (false, [])
@@ -253,15 +264,33 @@ let rule_match_nosem (pm : Pattern_match.t) : bool * Core_error.t list =
 (* Entry points *)
 (*****************************************************************************)
 
+let produce_single_ignored (match_ : Core_result.processed_match) :
+    Core_result.processed_match * Core_error.t list =
+  try
+    let is_ignored, errors = rule_match_nosem match_.pm in
+    ({ match_ with is_ignored }, errors)
+  with
+  | (Time_limit.Timeout _ | Common.ErrorOnFile _) as exn ->
+      Exception.catch_and_reraise exn
+  | exn ->
+      (* let's rewrap the exn with ErrorOnFile *)
+      let e = Exception.catch exn in
+      let trace = Exception.get_trace e in
+      let msg = Printexc.to_string exn in
+      let exn =
+        Common.ErrorOnFile
+          ( spf "produce_ignored: %s" msg,
+            match_.pm.path.internal_path_to_content )
+      in
+      let e = Exception.create exn trace in
+      Exception.reraise e
+
+(* TODO Inline at callsites? *)
 let produce_ignored (matches : Core_result.processed_match list) :
     Core_result.processed_match list * Core_error.t list =
   (* filters [rule_match]s by the [nosemgrep] tag. *)
   let matches, wide_errors =
-    matches
-    |> List_.map (fun (pm : Core_result.processed_match) ->
-           let is_ignored, errors = rule_match_nosem pm.pm in
-           ({ pm with is_ignored }, errors))
-    |> List_.split
+    matches |> List_.map produce_single_ignored |> List_.split
   in
   (matches, List_.flatten wide_errors)
 

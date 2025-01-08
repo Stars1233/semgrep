@@ -26,7 +26,21 @@ module T = Taint
 module Fields = Map.Make (struct
   type t = T.offset
 
-  let compare o1 o2 = T.compare_offset o1 o2
+  (* In taint shapes we consider 'Ofld' and 'Ostr' to be the same, given that
+     in some languages like JS/TS you can treat records as if they were dicts
+     with string keys. *)
+  let compare (o1 : t) (o2 : t) =
+    match (o1, o2) with
+    | Ofld fld1, Ofld fld2 -> String.compare (fst fld1.ident) (fst fld2.ident)
+    | Ostr str1, Ostr str2 -> String.compare str1 str2
+    | Ofld fld1, Ostr str2 -> String.compare (fst fld1.ident) str2
+    | Ostr str1, Ofld fld2 -> String.compare str1 (fst fld2.ident)
+    | Oint i1, Oint i2 -> Int.compare i1 i2
+    | Oany, Oany -> 0
+    | (Ofld _ | Ostr _), (Oint _ | Oany) -> -1
+    | Oint _, Oany -> -1
+    | Oany, (Ofld _ | Ostr _ | Oint _) -> 1
+    | Oint _, (Ofld _ | Ostr _) -> 1
 end)
 
 (** A shape approximates an object or data structure, and tracks the taint
@@ -68,58 +82,60 @@ module rec Shape : sig
     | Bot  (** _|_, don't know or don't care *)
     | Obj of obj
         (** An "object" or struct-like thing.
-          *
-          * Tuples or lists are also represented by 'Obj' shapes! We just treat
-          * constant indexes as if they were fields, and use 'Oany' to capture the
-          * non-constant indexes.
+
+           Tuples or lists are also represented by 'Obj' shapes! We just treat
+           constant indexes as if they were fields, and use 'Oany' to capture the
+           non-constant indexes.
           *)
     | Arg of Taint.arg
         (** Represents the yet-unknown shape of a function/method parameter. It is
-          * a polymorphic shape variable that is meant to be instantiated at call
-          * site. Before adding 'Arg' we assumed parameters had shape 'Bot', and
-          * 'Arg' still acts like 'Bot' in some places. *)
+            a polymorphic shape variable that is meant to be instantiated at call
+            site. Before adding 'Arg' we assumed parameters had shape 'Bot', and
+            'Arg' still acts like 'Bot' in some places.
+
+            TODO: Generalize to 'Taint.lval', e.g. `function test(o) { return o.x }`. *)
     | Fun of Signature.t
         (** Function shapes. These enable Semgrep to handle HOFs. *)
 
   and cell =
     | Cell of Xtaint.t * shape
         (** A cell or "reference" represents the "storage" of a value, like
-          * a variable in C.
-          *
-          * A cell may be explicitly tainted ('`Tainted'), not explicitly tainted
-          * ('`None' / "0"),  or explicitly clean ('`Clean' / "C").
-          *
-          * A cell that is not explicitly tainted inherits any taints from "parent"
-          * refs. A cell that is explicitly clean it is clean regardless.
-          *
-          * For example, given a variable `x` and the following statements:
-          *
-          *     x.a := "taint";
-          *     x.a.u := "clean";
-          *
-          * We could assign the following shape to `x`:
-          *
-          *     Cell(`None, Obj {
-          *             .a -> Cell({"taint"}, Obj {
-          *                     .u -> Cell(`Clean, _|_)
-          *                     })
-          *             })
-          *
-          * We have that `x` itself has no taint directly assigned to it, but `x.a` is
-          * tainted (by the string `"taint"`). Other fields like `x.b` are not tainted.
-          * When it comes to `x.a`, we have that `x.a.u` has been explicitly marked clean,
-          * so `x.a.u` will be considered clean despite `x.a` being tainted. Any other field
-          * of `x.a` such as `x.a.v` will inherit the same taint as `x.a`.
-          *
-          * INVARIANT(cell): To keep shapes minimal:
-          *   1. If the xtaint is '`None', then the shape is not 'Bot' and we can reach
-          *      another 'cell' whose xtaint is either '`Tainted' or '`Clean'.
-          *   2. If the xtaint is '`Clean', then the shape is 'Bot'.
-          *      (If we add aliasing we may need to revisit this, and instead just mark
-          *       every reachable 'cell' as clean too.)
-          *
-          * TODO: We can attach "region ids" to refs and assign taints to regions rather than
-          *   to refs directly, then we can have alias analysis.
+            a variable in C.
+
+            A cell may be explicitly tainted ('`Tainted'), not explicitly tainted
+            ('`None' / "0"),  or explicitly clean ('`Clean' / "C").
+
+            A cell that is not explicitly tainted inherits any taints from "parent"
+            refs. A cell that is explicitly clean it is clean regardless.
+
+            For example, given a variable `x` and the following statements:
+
+                x.a := "taint";
+                x.a.u := "clean";
+
+            We could assign the following shape to `x`:
+
+                Cell(`None, Obj {
+                        .a -> Cell({"taint"}, Obj {
+                                .u -> Cell(`Clean, _|_)
+                                })
+                        })
+
+            We have that `x` itself has no taint directly assigned to it, but `x.a` is
+            tainted (by the string `"taint"`). Other fields like `x.b` are not tainted.
+            When it comes to `x.a`, we have that `x.a.u` has been explicitly marked clean,
+            so `x.a.u` will be considered clean despite `x.a` being tainted. Any other field
+            of `x.a` such as `x.a.v` will inherit the same taint as `x.a`.
+
+            INVARIANT(cell): To keep shapes minimal:
+              1. If the xtaint is '`None', then the shape is not 'Bot' and we can reach
+                 another 'cell' whose xtaint is either '`Tainted' or '`Clean'.
+              2. If the xtaint is '`Clean', then the shape is 'Bot'.
+                 (If we add aliasing we may need to revisit this, and instead just mark
+                  every reachable 'cell' as clean too.)
+
+            TODO: We can attach "region ids" to refs and assign taints to regions rather than
+              to refs directly, then we can have alias analysis.
           *)
 
   and obj = cell Fields.t
@@ -151,6 +167,7 @@ module rec Shape : sig
   val compare_shape : shape -> shape -> int
   val show_cell : cell -> string
   val show_shape : shape -> string
+  val show_obj : obj -> string
 end = struct
   type shape = Bot | Obj of obj | Arg of T.arg | Fun of Signature.t
   and cell = Cell of Xtaint.t * shape
@@ -233,7 +250,7 @@ end
 (* Taint results & signatures *)
 (*****************************************************************************)
 and Effect : sig
-  type sink = { pm : Pattern_match.t; rule_sink : R.taint_sink }
+  type sink = { pm : Core_match.t; rule_sink : R.taint_sink }
   (** A sink match with its corresponding sink specification (one of the `pattern-sinks`). *)
 
   type taint_to_sink_item = {
@@ -350,12 +367,13 @@ and Effect : sig
   (* Mainly for debugging *)
   val show_sink : sink -> string
   val show_args_taints : args_taints -> string
+  val show_taint_to_sink_item : taint_to_sink_item -> string
   val show_taints_to_sink : taints_to_sink -> string
   val show_taints_to_return : taints_to_return -> string
 end = struct
   module Taints = Taint.Taint_set
 
-  type sink = { pm : Pattern_match.t; rule_sink : R.taint_sink }
+  type sink = { pm : Core_match.t; rule_sink : R.taint_sink }
   type taint_to_sink_item = { taint : T.taint; sink_trace : unit T.call_trace }
 
   type taints_to_sink = {
@@ -496,7 +514,7 @@ end = struct
       Range.content_at_range pm.path.internal_path_to_content r
     in
     let matched_line =
-      let loc1, _ = pm.Pattern_match.range_loc in
+      let loc1, _ = pm.range_loc in
       loc1.Tok.pos.line
     in
     spf "(%s at l.%d by %s)" matched_str matched_line rule_sink.R.sink_id
@@ -597,7 +615,7 @@ and Signature : sig
     * parameter kinds that we do not support yet. We don't want to just remove
     * those unsupported parameters because we rely on the position of a parameter
     * to represent taint variables, see 'Taint.arg'. *)
-  type param = P of string | Other [@@deriving eq, ord]
+  type param = P of IL.name | Other [@@deriving eq, ord]
 
   type params = param list [@@deriving eq, ord]
 
@@ -615,12 +633,12 @@ end = struct
   (*************************************)
 
   (* TODO: Now with HOFs we run the risk of shadowing... *)
-  type param = P of string | Other
+  type param = P of IL.name | Other
   type params = param list
 
   let equal_param param1 param2 =
     match (param1, param2) with
-    | P s1, P s2 -> String.equal s1 s2
+    | P n1, P n2 -> IL.equal_name n1 n2
     | Other, Other -> true
     | P _, Other
     | Other, P _ ->
@@ -628,13 +646,13 @@ end = struct
 
   let compare_param param1 param2 =
     match (param1, param2) with
-    | P s1, P s2 -> String.compare s1 s2
+    | P n1, P n2 -> IL.compare_name n1 n2
     | Other, Other -> 0
     | P _, Other -> -1
     | Other, P _ -> 1
 
   let show_param = function
-    | P s -> s
+    | P n -> IL.str_of_name n
     | Other -> "_?"
 
   let equal_params params1 params2 = List.equal equal_param params1 params2
@@ -647,7 +665,7 @@ end = struct
   let of_IL_params il_params =
     il_params
     |> List_.map (function
-         | IL.Param { pname = { ident = s, _; _ }; _ } -> P s
+         | IL.Param { pname; _ } -> P pname
          | IL.PatternParam _
          | IL.FixmeParam ->
              Other)

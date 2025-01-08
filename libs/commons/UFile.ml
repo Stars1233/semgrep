@@ -1,6 +1,6 @@
 (* Martin Jambon
  *
- * Copyright (C) 2023 Semgrep Inc.
+ * Copyright (C) 2023-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -50,7 +50,7 @@ module Legacy = struct
     let chan = UStdlib.open_in_bin file in
     try
       while true do
-        acc := input_text_line chan :: !acc
+        acc := Common.input_text_line chan :: !acc
       done;
       assert false
     with
@@ -217,39 +217,72 @@ let filemtime file =
   if !Common.jsoo then failwith "JSOO:filemtime"
   else (UUnix.stat !!file).st_mtime
 
-(* TODO? there's also USys.is_directory? *)
-let is_directory file = (UUnix.stat !!file).st_kind =*= Unix.S_DIR
-let is_file file = (UUnix.stat !!file).st_kind =*= Unix.S_REG
-let is_symlink file = (UUnix.lstat !!file).st_kind =*= Unix.S_LNK
+let is_dir ~follow_symlinks path =
+  let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
+  match (stat !!path).st_kind with
+  | S_DIR -> true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+let is_reg ~follow_symlinks path =
+  let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
+  match (stat !!path).st_kind with
+  | S_REG -> true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+let is_dir_or_reg ~follow_symlinks path =
+  let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
+  match (stat !!path).st_kind with
+  | S_DIR
+  | S_REG ->
+      true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+let is_lnk path =
+  match (UUnix.lstat !!path).st_kind with
+  | S_LNK -> true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+let is_lnk_or_reg path =
+  match (UUnix.lstat !!path).st_kind with
+  | S_LNK
+  | S_REG ->
+      true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+(* This function isn't very useful but we offer it for completeness. *)
+let is_dir_or_lnk path =
+  match (UUnix.lstat !!path).st_kind with
+  | S_LNK
+  | S_DIR ->
+      true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
+
+let is_dir_or_lnk_or_reg path =
+  match (UUnix.lstat !!path).st_kind with
+  | S_DIR
+  | S_LNK
+  | S_REG ->
+      true
+  | _ -> false
+  | exception UUnix.Unix_error _ -> false
 
 let is_executable file =
   let stat = UUnix.stat !!file in
   let perms = stat.st_perm in
   stat.st_kind =*= Unix.S_REG && perms land 0o011 <> 0
 
-let lfile_exists filename =
-  try
-    match (UUnix.lstat !!filename).st_kind with
-    | Unix.S_REG
-    | Unix.S_LNK ->
-        true
-    | _ -> false
-  with
-  | UUnix.Unix_error (Unix.ENOENT, _, _) -> false
-
-(* Helps avoid the `Fatal error: exception Unix_error: No such file or directory stat` *)
-let dir_exists path =
-  try
-    match (UUnix.lstat !!path).st_kind with
-    | S_DIR -> true
-    | _ -> false
-  with
-  | UUnix.Unix_error (Unix.ENOENT, _, _) -> false
-
 let rec make_directories dir =
   try UUnix.mkdir !!dir 0o755 with
   (* The directory already exists *)
-  | UUnix.Unix_error ((EEXIST | EISDIR), _, _) when is_directory dir -> ()
+  | UUnix.Unix_error ((EEXIST | EISDIR), _, _)
+    when is_dir ~follow_symlinks:false dir ->
+      ()
   (* parent doesn't exist *)
   | UUnix.Unix_error (ENOENT, _, _) ->
       let parent = Fpath.parent dir in
@@ -273,10 +306,36 @@ let find_first_match_with_whole_line path ?split term =
  * each time the same file for each match.
  * Note that the returned lines do not contain \n.
  *)
-let lines_of_file (start_line, end_line) file : string list =
+let lines_of_file (start_line, end_line) (file : Fpath.t) :
+    (string list, string) result =
   let arr = cat_array file in
-  let lines = List_.enum start_line end_line in
-  match arr with
-  (* This is the case of the empty file. *)
-  | [| "" |] -> []
-  | _ -> lines |> List_.map (fun i -> arr.(i))
+  if not (start_line <= end_line) then
+    Error
+      (spf "lines_of_file: start line %d > end line %d for %s" start_line
+         end_line !!file)
+  else
+    let line_idx = List_.enum start_line end_line in
+    match arr with
+    (* This is the case of the empty file.
+     * TODO: but then we should also thrown an ex if line_idx is not null?
+     *)
+    | [| "" |] -> Ok []
+    | _ -> (
+        try
+          Ok
+            (line_idx
+            |> List_.map (fun i ->
+                   try arr.(i) with
+                   | Invalid_argument s ->
+                       raise (Invalid_argument (spf "%s on index %d" s i))))
+        with
+        | Invalid_argument s -> Error (spf "lines_of_file: %s" s))
+
+(* alt: we could also provide the variant below but probably better to force the
+ * caller to propery handle out of bounds errors
+ *
+ * let lines_of_file_exn (start_line, end_line) (file: Fpath.t) : string list =
+ *  match lines_of_file (start_line, end_line) file with
+ *  | Ok xs -> xs
+ *  | Error s -> raise (Common.ErrorOnFile (spf "lines_of_file_exn(): %s" s, file))
+ *)

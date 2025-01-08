@@ -5,10 +5,11 @@ val format : Out.output_format -> Out.format_context -> Out.cli_output -> string
 
 val sarif_format :
   < tmp : Cap.FS.tmp > ->
+  Out.fpath (* path to a temporary files containing the rules *) ->
+  Out.format_context ->
   bool ->
   string ->
   bool ->
-  Out.fpath ->
   Out.cli_match list ->
   Out.cli_error list ->
   string * float
@@ -18,8 +19,8 @@ val validate : Out.fpath -> bool
 
 val hook_resolve_dependencies :
   (< Cap.exec ; Cap.tmp > ->
-  Out.manifest list ->
-  (Out.manifest * Out.resolution_result) list)
+  Out.dependency_source list ->
+  (Out.dependency_source * Out.resolution_result) list)
   option
   ref
 

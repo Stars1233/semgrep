@@ -18,11 +18,11 @@ module FT = File_type
 open Rule
 module R = Rule
 module E = Core_error
-module P = Pattern_match
+module PM = Core_match
 module RP = Core_result
 module SJ = Semgrep_output_v1_j
 module Set = Set_
-module OutJ = Semgrep_output_v1_t
+module Out = Semgrep_output_v1_t
 
 (*****************************************************************************)
 (* Prelude *)
@@ -74,7 +74,7 @@ let error (rule : Rule.t) (t : Tok.t) (s : string) : Core_error.t =
   in
   let _check_idTODO = "semgrep-metacheck-builtin" in
   let rule_id, _ = rule.id in
-  E.mk_error ~rule_id ~msg:s ?loc OutJ.SemgrepMatchFound
+  E.mk_error ~rule_id ~msg:s ?loc Out.SemgrepMatchFound
 
 (*****************************************************************************)
 (* Checks *)
@@ -253,15 +253,15 @@ let check r =
   | `Steps _ -> (* TODO *) []
   | `SCA _ -> (* TODO *) []
 
-let semgrep_check (caps : Core_scan.caps) (metachecks : Fpath.t)
+let semgrep_check (caps : < Core_scan.caps ; .. >) (metachecks : Fpath.t)
     (rules : Fpath.t list) : Core_error.t list =
-  let match_to_semgrep_error (m : Pattern_match.t) : Core_error.t =
-    let loc, _ = m.P.range_loc in
+  let match_to_semgrep_error (m : Core_match.t) : Core_error.t =
+    let loc, _ = m.range_loc in
     (* TODO use the end location in errors *)
     let s = m.rule_id.message in
     let _check_id = m.rule_id.id in
     (* TODO: why not set ~rule_id here?? bug? *)
-    E.mk_error ~msg:s ~loc OutJ.SemgrepMatchFound
+    E.mk_error ~msg:s ~loc Out.SemgrepMatchFound
   in
   (* LATER: what if the rule is written in Jsonnet or JSON ? *)
   let lang : Lang.t = Yaml in
@@ -286,7 +286,7 @@ let semgrep_check (caps : Core_scan.caps) (metachecks : Fpath.t)
       |> List_.map match_to_semgrep_error
   | Error exn -> Exception.reraise exn
 
-let run_checks (caps : Core_scan.caps) (metachecks : Fpath.t)
+let run_checks (caps : < Core_scan.caps ; .. >) (metachecks : Fpath.t)
     (xs : Fpath.t list) : Core_error.t list =
   let yaml_xs, skipped_paths =
     xs
@@ -327,7 +327,7 @@ let run_checks (caps : Core_scan.caps) (metachecks : Fpath.t)
  * caps = Core_scan.caps + Cap.stdout
  *)
 let check_files
-    (caps : < Cap.stdout ; Cap.fork ; Cap.time_limit ; Cap.memory_limit >)
+    (caps : < Cap.stdout ; Cap.fork ; Cap.time_limit ; Cap.memory_limit ; .. >)
     (output_format : Core_scan_config.output_format) (input : Fpath.t list) :
     unit =
   let errors =
@@ -338,7 +338,7 @@ let check_files
           (No_metacheck_file
              "check_rules needs a metacheck file or directory and rules to run \
               on")
-    | metachecks :: xs -> run_checks (caps :> Core_scan.caps) metachecks xs
+    | metachecks :: xs -> run_checks caps metachecks xs
   in
   match output_format with
   | NoOutput -> ()

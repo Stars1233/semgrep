@@ -14,12 +14,11 @@
  *)
 open Common
 open Fpath_.Operators
-module PM = Pattern_match
+module PM = Core_match
 module E = Core_error
 module ESet = Core_error.ErrorSet
 module MR = Mini_rule
 module R = Rule
-module In = Input_to_core_j
 module Out = Semgrep_output_v1_j
 
 (*****************************************************************************)
@@ -32,8 +31,8 @@ module Out = Semgrep_output_v1_j
  * When invoked by `pysemgrep`, `semgrep-core` will always be passed
  * `-rules` and `-targets`.
  * While the `rules` file is just the collection of rules, the `targets` file
- * describes the mapping of targets to rules. See `Input_to_core.atd` target
- * type. `semgrep-core` follows the target-to-rulemappings without validation
+ * describes the mapping of targets to rules.
+ * `semgrep-core` follows the target-to-rulemappings without validation
  * or filtering.
  *
  * ## Performance
@@ -212,11 +211,9 @@ let filter_files_with_too_many_matches_and_transform_as_timeout
            let sorted_offending_rules =
              let matches = List.assoc file per_files in
              matches
-             |> List_.map (fun m ->
-                    let rule_id = m.Pattern_match.rule_id in
-                    ( ( rule_id.Pattern_match.id,
-                        rule_id.Pattern_match.pattern_string ),
-                      m ))
+             |> List_.map (fun (m : Core_match.t) ->
+                    let rule_id = m.rule_id in
+                    ((rule_id.id, rule_id.pattern_string), m))
              |> Assoc.group_assoc_bykey_eff
              |> List_.map (fun (k, xs) -> (k, List.length xs))
              |> Assoc.sort_by_val_highfirst
@@ -319,8 +316,8 @@ let targets_of_config (config : Core_scan_config.t) :
   | Targets x -> x |> filter_existing_targets
   | Target_file target_file ->
       UFile.read_file target_file
-      |> In.targets_of_string
-      |> List_.map Target.target_of_input_to_core
+      |> Out.targets_of_string
+      |> List_.map Target.target_of_target
       |> filter_existing_targets
 
 (*****************************************************************************)
@@ -418,11 +415,10 @@ let handle_target_with_trace (handle_target : Target.t -> 'a) (t : Target.t) :
     'a =
   let target_name = Target.internal_path t in
   let data () =
-    let target_json_str = Target.to_yojson t |> Yojson.Safe.to_string in
     [
       ("filename", `String !!target_name);
       ("num_bytes", `Int (UFile.filesize target_name));
-      ("target", `String target_json_str);
+      ("target", `String (Target.show t));
     ]
   in
   Tracing.with_span ~__FILE__ ~__LINE__ ~data "scan.handle_target" (fun _sp ->
@@ -525,7 +521,7 @@ let errors_of_timeout_or_memory_exn (exn : exn) (target : Target.t) : ESet.t =
 
 (* Returns a list of match results and a separate list of scanned targets *)
 let iter_targets_and_get_matches_and_exn_to_errors
-    (caps : < Cap.fork ; Cap.memory_limit >) (config : Core_scan_config.t)
+    (caps : < Cap.fork ; Cap.memory_limit ; .. >) (config : Core_scan_config.t)
     (handle_target : target_handler) (targets : Target.t list) :
     Core_profiling.file_profiling Core_result.match_result list * Target.t list
     =
@@ -726,23 +722,22 @@ let rules_for_target ~analyzer ~products ~origin ~respect_rule_paths rules =
 (* SCA *)
 (*****************************************************************************)
 
-let lockfile_xtarget_resolve (lockfile : Target.lockfile) : Lockfile_xtarget.t =
-  Lockfile_xtarget.resolve Parse_lockfile.parse_manifest
-    Parse_lockfile.parse_lockfile lockfile
+let lockfile_xtarget_resolve (manifest : Manifest.t option)
+    (lockfile : Lockfile.t) : Lockfile_xtarget.t =
+  Lockfile_xtarget.resolve Parse_lockfile.parse_manifest Parse_lockfile.parse
+    lockfile manifest
 
 let rules_for_lockfile_kind ~lockfile_kind rules =
   rules
   |> List_.filter_map (fun ({ Rule.dependency_formula; _ } as r) ->
-         match dependency_formula with
-         | None -> None
-         | Some formula ->
-             if
-               formula
-               |> List.exists (fun R.{ ecosystem; _ } ->
-                      Semgrep_output_v1_t.equal_ecosystem ecosystem
-                        (Lockfile_kind.to_ecosystem lockfile_kind))
-             then Some (r, formula)
-             else None)
+         let* formula = dependency_formula in
+         let* ecosystem = Lockfile.kind_to_ecosystem_opt lockfile_kind in
+         if
+           formula
+           |> List.exists (fun SCA_pattern.{ ecosystem = rule_ecosystem; _ } ->
+                  Semgrep_output_v1_t.equal_ecosystem rule_ecosystem ecosystem)
+         then Some (r, formula)
+         else None)
 
 let supply_chain_rules ~lockfile_kind ~respect_rule_paths ~origin rules =
   let rules = rules_for_lockfile_kind ~lockfile_kind rules in
@@ -752,9 +747,9 @@ let supply_chain_rules ~lockfile_kind ~respect_rule_paths ~origin rules =
   else rules
 
 let sca_rules_filtering (target : Target.regular) (rules : Rule.t list) :
-    Rule.t list * Match_dependency.dependency_match_table =
+    Rule.t list * Match_SCA_mode.dependency_match_table =
   let lockfile_xtarget_opt =
-    target.lockfile |> Option.map lockfile_xtarget_resolve
+    target.lockfile |> Option.map (lockfile_xtarget_resolve None)
   in
   (* If a rule tried to a find a dependency match and failed, then it will
      never produce any matches of any kind *)
@@ -763,7 +758,7 @@ let sca_rules_filtering (target : Target.regular) (rules : Rule.t list) :
     | None -> ([], rules |> List_.map (fun x -> (x, None)))
     | Some lockfile_target ->
         rules
-        |> Match_dependency.match_all_dependencies lockfile_target
+        |> Match_SCA_mode.match_all_dependencies lockfile_target
         |> Either_.partition (function
              | rule, Some [] -> Left rule
              | x -> Right x)
@@ -789,9 +784,13 @@ let mk_target_handler (caps : < Cap.time_limit >) (config : Core_scan_config.t)
     (prefilter_cache_opt : Match_env.prefilter_config) : target_handler =
   (* Note that this function runs in another process *)
   function
-  | Lockfile
-      ({ path = { internal_path_to_content; origin }; kind; _ } as lockfile) ->
-      let lockfile_xtarget = lockfile_xtarget_resolve lockfile in
+  | Lockfile ({ path; kind } as lockfile) ->
+      (* TODO: (sca) we always pass None as the manifest target here, but this
+       * code path only applies to Supply Chain scans in the core which we
+       * never use. We should pass the real manifest here.
+       *)
+      let lockfile_xtarget = lockfile_xtarget_resolve None lockfile in
+      let origin = Origin.File path in
       let rules =
         supply_chain_rules ~lockfile_kind:kind ~origin
           ~respect_rule_paths:config.respect_rule_paths valid_rules
@@ -799,12 +798,11 @@ let mk_target_handler (caps : < Cap.time_limit >) (config : Core_scan_config.t)
       let dep_matches =
         rules
         |> List_.map (fun (rule, dep_formula) ->
-               Match_dependency.check_rule rule lockfile_xtarget dep_formula)
+               Match_SCA_mode.check_rule rule lockfile_xtarget dep_formula)
       in
       let was_scanned = not (List_.null rules) in
       (* TODO: run all the right hooks *)
-      ( Core_result.collate_rule_results internal_path_to_content dep_matches,
-        was_scanned )
+      (Core_result.collate_rule_results path dep_matches, was_scanned)
   | Regular
       ({
          analyzer;
@@ -842,7 +840,7 @@ let mk_target_handler (caps : < Cap.time_limit >) (config : Core_scan_config.t)
               caps;
             }
       in
-      let matches =
+      let matches : Core_result.matches_single_file =
         (* !!Calling Match_rules!! Calling the matching engine!! *)
         Match_rules.check ~match_hook ~timeout ~dependency_match_table xconf
           rules xtarget
@@ -857,7 +855,7 @@ let mk_target_handler (caps : < Cap.time_limit >) (config : Core_scan_config.t)
       (matches, was_scanned)
 
 (* coupling: with Deep_scan.scan_aux() *)
-let scan_exn (caps : caps) (config : Core_scan_config.t)
+let scan_exn (caps : < caps ; .. >) (config : Core_scan_config.t)
     (rules : Rule_error.rules_and_invalid * float) : Core_result.t =
   Logs.debug (fun m -> m "Core_scan.scan_exn %s" (Core_scan_config.show config));
   (* the rules *)
@@ -928,8 +926,8 @@ let scan_exn (caps : caps) (config : Core_scan_config.t)
  * coupling: If you modify this function, you probably need also to modify
  * Deep_scan.scan() in semgrep-pro which is mostly a copy-paste of this file.
  *)
-let scan (caps : caps) (config : Core_scan_config.t) : Core_result.result_or_exn
-    =
+let scan (caps : < caps ; .. >) (config : Core_scan_config.t) :
+    Core_result.result_or_exn =
   try
     let timed_rules =
       Common.with_time (fun () ->

@@ -27,7 +27,6 @@ module Log = Log_semgrep.Log
  * Semgrep_output_v1.core_error, then processed in pysemgrep (or osemgrep)
  * and translated again in Semgrep_output_v1.error.
  * There's also Error.ml in osemgrep.
- *
  * LATER: it would be good to remove some intermediate types.
  *)
 
@@ -80,7 +79,7 @@ end)
 
 let please_file_issue_text =
   "An error occurred while invoking the Semgrep engine. Please help us fix \
-   this by creating an issue at https://github.com/returntocorp/semgrep"
+   this by creating an issue at https://github.com/semgrep/semgrep"
 
 let mk_error ?rule_id ?(msg = "") ?(loc : Tok.location option)
     (err : Out.error_type) : t =
@@ -245,9 +244,16 @@ let known_exn_to_error ?(file : Fpath.t option) (e : Exception.t) : t option =
         Some (Tok.first_loc_of_file file)
       in
       Some (mk_error ~msg:"Heap space exceeded" ?loc Out.OutOfMemory)
+  | Common.ErrorOnFile (s, file) ->
+      let loc = Some (Tok.first_loc_of_file file) in
+      (* TODO: see the comment below we want OtherErrorWithAttachedFile *)
+      Some (mk_error ~msg:s ?loc Out.OtherParseError)
   (* general case, can't extract line information from it, default to line 1 *)
   | _exn -> None
 
+(* TODO: remove the file parameter and instead rewrap exns in the caller
+ * using Common.ErrorOnFile
+ *)
 let exn_to_error ?(file : Fpath.t option) (e : Exception.t) : t =
   match known_exn_to_error ?file e with
   | Some err -> err

@@ -360,6 +360,7 @@ class ConfigLoader:
                 )
 
             scan_response = out.ScanResponse.from_json(response.json())
+            get_state().traces.set_scan_info(scan_response.info)
             return ConfigFile(None, scan_response.config.rules.to_json_string(), url)
 
         except requests.exceptions.RetryError as ex:
@@ -573,7 +574,8 @@ class Config:
 
         for i, config in enumerate(configs):
             try:
-                # Patch config_id to fix https://github.com/returntocorp/semgrep/issues/1912
+                # Patch config_id to fix
+                # https://github.com/semgrep/semgrep/issues/1912
                 resolved_config, config_errors = resolve_config(
                     config, project_url, force_jsonschema=force_jsonschema
                 )

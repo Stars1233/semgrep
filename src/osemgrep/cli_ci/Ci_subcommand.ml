@@ -1,3 +1,17 @@
+(* Yoann Padioleau, Robur
+ *
+ * Copyright (C) 2023-2024 Semgrep Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation, with the
+ * special exception on linking described in file LICENSE.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
 open Common
 module Out = Semgrep_output_v1_j
 
@@ -30,7 +44,7 @@ module Out = Semgrep_output_v1_j
    to look at the latest errors.
 
    As an example, here is a workflow that failed in the past:
-   https://github.com/returntocorp/semgrep/actions/runs/6599573075/job/17928762827
+   https://github.com/semgrep/semgrep/actions/runs/6599573075/job/17928762827
    Looking at the job log, we can see a problem when connecting to
    the https://semgrep.dev/api/agent/scans/14253285/complete endpoint.
    Then in Sentry you can paste this 'url: <URL>' in the query and search
@@ -135,139 +149,6 @@ let sanity_check_contributions (contribs : Out.contribution list) : unit =
             (Out.string_of_contribution x))
 
 (*****************************************************************************)
-(* Scan config *)
-(*****************************************************************************)
-(* token -> deployment_config -> scan_id -> scan_config -> rules *)
-
-let caps_with_token (token_opt : Auth.token option) caps =
-  let token =
-    match token_opt with
-    | Some tok -> tok
-    | None ->
-        Logs.app (fun m ->
-            m
-              "run `semgrep login` before using `semgrep ci` or use `semgrep \
-               scan` and set `--config`");
-        Error.exit_code_exn (Exit_code.invalid_api_key ~__LOC__)
-  in
-  Auth.cap_token_and_network_and_tmp_and_exec token caps
-
-(* if something fails, we Error.exit_code_exn *)
-let deployment_config (caps : < Cap.network ; Auth.cap_token ; .. >) :
-    Out.deployment_config =
-  match Semgrep_App.get_deployment_from_token caps with
-  | None ->
-      Logs.app (fun m ->
-          m
-            "API token not valid. Try to run `semgrep logout` and `semgrep \
-             login` again. Or in CI, ensure your SEMGREP_APP_TOKEN variable is \
-             set correctly.");
-      Error.exit_code_exn (Exit_code.invalid_api_key ~__LOC__)
-  | Some deployment_config ->
-      Logs.debug (fun m ->
-          m "received deployment = %s"
-            (Out.show_deployment_config deployment_config));
-      deployment_config
-
-(* eventually output the origin (if the semgrep_url is not semgrep.dev) *)
-let at_url_maybe ppf () : unit =
-  if
-    Uri.equal !Semgrep_envvars.v.semgrep_url
-      (Uri.of_string "https://semgrep.dev")
-  then Fmt.string ppf ""
-  else
-    Fmt.pf ppf " at %a"
-      Fmt.(styled `Bold string)
-      (Uri.to_string !Semgrep_envvars.v.semgrep_url)
-
-(* [data] contains the rules in JSON format. That's how the registry send
- * them because it's faster than using YAML.
- * TODO: factorize with Session.decode_rules()
- *)
-let decode_json_rules caps (data : string) : Rule_fetching.rules_and_origin =
-  CapTmp.with_temp_file caps#tmp ~contents:data ~suffix:".json" (fun file ->
-      match
-        Rule_fetching.load_rules_from_file ~rewrite_rule_ids:false ~origin:App
-          caps file
-      with
-      | Ok rules -> rules
-      | Error _err ->
-          (* There shouldn't be any errors, because we obtained these rules
-             from CI.
-          *)
-          failwith "impossible: received an invalid rule from CI")
-
-let scan_config_and_rules_from_deployment ~dry_run
-    (prj_meta : Out.project_metadata)
-    (caps : < Cap.network ; Auth.cap_token ; .. >)
-    (deployment_config : Out.deployment_config) :
-    Semgrep_App.scan_id * Out.scan_config * Rule_fetching.rules_and_origin list
-    =
-  Logs.app (fun m -> m "  %a" Fmt.(styled `Underline string) "CONNECTION");
-  Logs.app (fun m ->
-      m "  Reporting start of scan for %a"
-        Fmt.(styled `Bold string)
-        deployment_config.name);
-  let scan_metadata : Out.scan_metadata =
-    {
-      cli_version = Version.version;
-      unique_id = Uuidm.v4_gen (Stdlib.Random.State.make_self_init ()) ();
-      (* TODO: should look at conf.secrets, conf.sca, conf.code, etc. *)
-      requested_products = [];
-      dry_run = false;
-      (* TODO: should come from environment variable if defined *)
-      sms_scan_id = None;
-    }
-  in
-  (* TODO:
-      metadata_dict["is_sca_scan"] = supply_chain
-      proj_config = ProjectConfig.load_all()
-      metadata_dict = {**metadata_dict, **proj_config.to_dict()}
-  *)
-  match Semgrep_App.start_scan ~dry_run caps prj_meta scan_metadata with
-  | Error msg ->
-      Logs.err (fun m -> m "Could not start scan %s" msg);
-      Error.exit_code_exn (Exit_code.fatal ~__LOC__)
-  | Ok scan_id ->
-      (* TODO: should be concatenated with the "Reporting start ..." *)
-      Logs.app (fun m -> m " (scan_id=%s)" scan_id);
-      (* TODO: set sca to metadata.is_sca_scan / supply_chain *)
-      let scan_config : Out.scan_config =
-        Logs.app (fun m ->
-            m "  Fetching configuration from Semgrep Cloud Platform%a"
-              at_url_maybe ());
-        match
-          (* TODO: should pass and use scan_id *)
-          Semgrep_App.fetch_scan_config caps ~sca:false ~dry_run
-            ~full_scan:prj_meta.is_full_scan ~repository:prj_meta.repository
-        with
-        | Error msg ->
-            Logs.err (fun m -> m "Failed to download configuration: %s" msg);
-            let r = Exit_code.fatal ~__LOC__ in
-            Semgrep_App.report_failure ~dry_run caps ~scan_id r;
-            Error.exit_code_exn r
-        | Ok config -> config
-      in
-
-      let rules_and_origins =
-        try
-          decode_json_rules
-            (caps :> < Cap.network ; Cap.tmp >)
-            scan_config.rule_config
-        with
-        | Error.Semgrep_error (_, opt_ex) as e ->
-            let ex =
-              match opt_ex with
-              | None -> Exit_code.fatal ~__LOC__
-              | Some exit_code -> exit_code
-            in
-            Semgrep_App.report_failure ~dry_run caps ~scan_id ex;
-            let e = Exception.catch e in
-            Exception.reraise e
-      in
-      (scan_id, scan_config, [ rules_and_origins ])
-
-(*****************************************************************************)
 (* Project metadata *)
 (*****************************************************************************)
 
@@ -329,6 +210,171 @@ let generate_meta_from_environment caps (baseline_ref : Digestif.SHA1.t option)
 (* match Sys.getenv_opt "TRAVIS" with
    | Some "true" -> return TravisMeta(baseline_ref)
    | _else -> return GitMeta(baseline_ref) *)
+
+(*****************************************************************************)
+(* Scan metadata *)
+(*****************************************************************************)
+
+let scan_metadata () : Out.scan_metadata =
+  let res =
+    Out.
+      {
+        cli_version = Version.version;
+        unique_id = Uuidm.v4_gen (Stdlib.Random.State.make_self_init ()) ();
+        (* TODO: should look at conf.secrets, conf.sca, conf.code, etc. *)
+        requested_products = [];
+        dry_run = false;
+        sms_scan_id = !Semgrep_envvars.v.sms_scan_id;
+      }
+  in
+  res.sms_scan_id
+  |> Option.iter (fun scan_id ->
+         Logs.debug (fun m -> m "SMS scan id: %s" scan_id));
+  res
+
+(*****************************************************************************)
+(* Project config *)
+(*****************************************************************************)
+(* TODO: read the .semgrepconfig.yml in the repo *)
+let project_config () : Out.ci_config_from_repo option =
+  (* alt: Out.{ version = "v1"; tags = None; } *)
+  None
+
+(*****************************************************************************)
+(* Scan config *)
+(*****************************************************************************)
+(* token -> deployment_config -> scan_id -> scan_config -> rules *)
+
+let caps_with_token (token_opt : Auth.token option) caps =
+  let token =
+    match token_opt with
+    | Some tok -> tok
+    | None ->
+        Logs.app (fun m ->
+            m
+              "run `semgrep login` before using `semgrep ci` or use `semgrep \
+               scan` and set `--config`");
+        Error.exit_code_exn (Exit_code.invalid_api_key ~__LOC__)
+  in
+  Auth.cap_token_and_network_and_tmp_and_exec token caps
+
+(* if something fails, we Error.exit_code_exn *)
+let deployment_config (caps : < Cap.network ; Auth.cap_token ; .. >) :
+    Out.deployment_config =
+  match Semgrep_App.get_deployment_from_token caps with
+  | None ->
+      Logs.app (fun m ->
+          m
+            "API token not valid. Try to run `semgrep logout` and `semgrep \
+             login` again. Or in CI, ensure your SEMGREP_APP_TOKEN variable is \
+             set correctly.");
+      Error.exit_code_exn (Exit_code.invalid_api_key ~__LOC__)
+  | Some deployment_config ->
+      Logs.debug (fun m ->
+          m "received deployment = %s"
+            (Out.show_deployment_config deployment_config));
+      deployment_config
+
+(* eventually output the origin (if the semgrep_url is not semgrep.dev) *)
+let at_url_maybe () : string =
+  if
+    Uri.equal !Semgrep_envvars.v.semgrep_url
+      (Uri.of_string "https://semgrep.dev")
+  then ""
+  else
+    spf " at %s" (Console.bold (Uri.to_string !Semgrep_envvars.v.semgrep_url))
+
+(* [data] contains the rules in JSON format. That's how the registry send
+ * them because it's faster than using YAML.
+ * TODO: factorize with Session.decode_rules()
+ *)
+let decode_json_rules caps (data : string) : Rule_fetching.rules_and_origin =
+  CapTmp.with_temp_file caps#tmp ~contents:data ~suffix:".json" (fun file ->
+      match
+        Rule_fetching.load_rules_from_file ~rewrite_rule_ids:false ~origin:App
+          caps file
+      with
+      | Ok rules -> rules
+      | Error _err ->
+          (* There shouldn't be any errors, because we obtained these rules
+             from CI.
+          *)
+          failwith "impossible: received an invalid rule from CI")
+
+let scan_config_and_rules_from_deployment ~dry_run
+    (prj_meta : Out.project_metadata)
+    (caps : < Cap.network ; Auth.cap_token ; .. >)
+    (deployment_config : Out.deployment_config) :
+    Semgrep_App.scan_id * Out.scan_config * Rule_fetching.rules_and_origin list
+    =
+  Logs.app (fun m -> m "  %s" (Console.underline "CONNECTION"));
+  Logs.app (fun m ->
+      m "  Reporting start of scan for %s" (Console.bold deployment_config.name));
+  let scan_metadata : Out.scan_metadata = scan_metadata () in
+  let project_config : Out.ci_config_from_repo option = project_config () in
+
+  (* TODO: deprecated from 1.43 *)
+  (* less: should concatenate with raw_json project_config *)
+  let meta =
+    (* ugly: would be good for ATDgen to generate also a json_of_xxx *)
+    prj_meta |> Out.string_of_project_metadata |> Yojson.Basic.from_string
+  in
+  let request : Out.scan_request =
+    {
+      meta = Some meta;
+      project_metadata = prj_meta;
+      scan_metadata;
+      project_config;
+    }
+  in
+
+  (* TODO:
+      metadata_dict["is_sca_scan"] = supply_chain
+      proj_config = ProjectConfig.load_all()
+      metadata_dict = {**metadata_dict, **proj_config.to_dict()}
+  *)
+  match Semgrep_App.start_scan ~dry_run caps request with
+  | Error msg ->
+      Logs.err (fun m -> m "Could not start scan %s" msg);
+      Error.exit_code_exn (Exit_code.fatal ~__LOC__)
+  | Ok scan_id ->
+      (* TODO: should be concatenated with the "Reporting start ..." *)
+      Logs.app (fun m -> m " (scan_id=%s)" scan_id);
+      (* TODO: set sca to metadata.is_sca_scan / supply_chain *)
+      let scan_config : Out.scan_config =
+        Logs.app (fun m ->
+            m "  Fetching configuration from Semgrep Cloud Platform%s"
+              (at_url_maybe ()));
+        match
+          (* TODO: should pass and use scan_id *)
+          Semgrep_App.fetch_scan_config caps ~sca:false ~dry_run
+            ~full_scan:prj_meta.is_full_scan ~repository:prj_meta.repository
+        with
+        | Error msg ->
+            Logs.err (fun m -> m "Failed to download configuration: %s" msg);
+            let r = Exit_code.fatal ~__LOC__ in
+            Semgrep_App.report_failure ~dry_run caps ~scan_id r;
+            Error.exit_code_exn r
+        | Ok config -> config
+      in
+
+      let rules_and_origins =
+        try
+          decode_json_rules
+            (caps :> < Cap.network ; Cap.tmp >)
+            scan_config.rule_config
+        with
+        | Error.Semgrep_error (_, opt_ex) as e ->
+            let ex =
+              match opt_ex with
+              | None -> Exit_code.fatal ~__LOC__
+              | Some exit_code -> exit_code
+            in
+            Semgrep_App.report_failure ~dry_run caps ~scan_id ex;
+            let e = Exception.catch e in
+            Exception.reraise e
+      in
+      (scan_id, scan_config, [ rules_and_origins ])
 
 (*****************************************************************************)
 (* Partition rules *)
@@ -508,19 +554,15 @@ let finding_of_cli_match _commit_date index (m : Out.cli_match) : Out.finding =
 (*****************************************************************************)
 
 let report_scan_environment (prj_meta : Out.project_metadata) : unit =
-  Logs.app (fun m -> m "  %a" Fmt.(styled `Underline string) "SCAN ENVIRONMENT");
+  Logs.app (fun m -> m "  %s" (Console.underline "SCAN ENVIRONMENT"));
   Logs.app (fun m ->
-      m "  versions    - semgrep %a on OCaml %a"
-        Fmt.(styled `Bold string)
-        Version.version
-        Fmt.(styled `Bold string)
-        Sys.ocaml_version);
+      m "  versions    - semgrep %s on OCaml %s"
+        (Console.bold Version.version)
+        (Console.bold Sys.ocaml_version));
   Logs.app (fun m ->
-      m "  environment - running in environment %a, triggering event is %a@."
-        Fmt.(styled `Bold string)
-        prj_meta.scan_environment
-        Fmt.(styled `Bold string)
-        prj_meta.on);
+      m "  environment - running in environment %s, triggering event is %s\n"
+        (Console.bold prj_meta.scan_environment)
+        (Console.bold prj_meta.on));
   ()
 
 let report_scan_completed ~blocking_findings ~blocking_rules
@@ -645,6 +687,8 @@ let findings_and_complete ~has_blocking_findings ~commit_date ~engine_requested
             Some (Semgrep_output_v1_j.string_of_engine_kind engine_requested);
           (* TODO: findings_by_product *)
           findings_by_product = None;
+          (* TODO: supply_chain_stats *)
+          supply_chain_stats = None;
         };
       (* TODO:
            if self._dependency_query:
@@ -715,7 +759,7 @@ let upload_findings ~dry_run
 
 (* All the business logic after command-line parsing. Return the desired
    exit code. *)
-let run_conf (caps : caps) (ci_conf : Ci_CLI.conf) : Exit_code.t =
+let run_conf (caps : < caps ; .. >) (ci_conf : Ci_CLI.conf) : Exit_code.t =
   let conf = ci_conf.scan_conf in
   (match conf.common.maturity with
   (* coupling: copy-pasted from Scan_subcommand.ml *)
@@ -755,8 +799,22 @@ let run_conf (caps : caps) (ci_conf : Ci_CLI.conf) : Exit_code.t =
   let depl = deployment_config caps' in
   (* TODO: pass baseline commit! *)
   let prj_meta = generate_meta_from_environment (caps :> < Cap.exec >) None in
-  Logs.app (fun m -> m "%a" Fmt_.pp_heading "Debugging Info");
+  Logs.app (fun m -> m "%s" (Console.heading "Debugging Info"));
   report_scan_environment prj_meta;
+
+  (* After sanity checking, we either
+   * (1) reach out to the server to get the config and then do a scan
+   * (2) perform one of the distributed scan steps and exit
+   *)
+
+  (* ===== Begin of steps related to distributed scans ===== *)
+  (* If we are doing a distributed scan step, complete the step, then exit *)
+  Distributed_scan_stub.maybe_merge_partial_scan_results_then_exit
+    ci_conf.x_distributed_scan_conf;
+  Distributed_scan_stub.maybe_validate_partial_scan_results_then_exit
+    ci_conf.x_distributed_scan_conf;
+
+  (* ===== End of steps related to distributed scans ===== *)
 
   (* TODO: fix_head_if_github_action(metadata) *)
   let scan_id, scan_config, rules_and_origin =
@@ -919,6 +977,6 @@ let run_conf (caps : caps) (ci_conf : Ci_CLI.conf) : Exit_code.t =
 (* Entry point *)
 (*****************************************************************************)
 
-let main (caps : caps) (argv : string array) : Exit_code.t =
+let main (caps : < caps ; .. >) (argv : string array) : Exit_code.t =
   let conf = Ci_CLI.parse_argv argv in
   run_conf caps conf

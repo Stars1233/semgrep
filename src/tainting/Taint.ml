@@ -14,7 +14,7 @@
  *)
 
 module G = AST_generic
-module PM = Pattern_match
+module PM = Core_match
 module R = Rule
 module LabelSet = Set.Make (String)
 module Log = Log_tainting.Log
@@ -119,7 +119,7 @@ let rec show_call_trace show_thing = function
         Range.content_at_range pm.path.internal_path_to_content r
       in
       let matched_line =
-        let loc1, _ = pm.Pattern_match.range_loc in
+        let loc1, _ = pm.range_loc in
         loc1.Tok.pos.line
       in
       Printf.sprintf "%s at l.%d [%s]" matched_str matched_line (show_thing x)
@@ -132,7 +132,7 @@ let rec show_call_trace show_thing = function
 (* Taint arguments ("variables", kind of) *)
 (*****************************************************************************)
 
-type arg = { name : string; index : int } [@@deriving eq, ord]
+type arg = { name : IL.name; index : int } [@@deriving eq, ord]
 type base = BGlob of IL.name | BThis | BArg of arg [@@deriving ord]
 
 type offset = Ofld of IL.name | Oint of int | Ostr of string | Oany
@@ -148,7 +148,8 @@ let compare_lval { base = base1; offset = offset1 }
   | 0 -> List.compare compare_offset offset1 offset2
   | other -> other
 
-let show_arg { name = s; index = i } = Printf.sprintf "arg(%s#%d)" s i
+let show_arg { name; index = i } =
+  Printf.sprintf "arg(%s#%d)" (IL.str_of_name name) i
 
 let show_base base =
   match base with
@@ -163,9 +164,10 @@ let show_offset offset =
   | Ostr s -> Printf.sprintf "[%s]" s
   | Oany -> "[*]"
 
-let show_lval { base; offset = os } =
-  show_base base
-  ^ if os <> [] then os |> List_.map show_offset |> String.concat "" else ""
+let show_offset_list offset =
+  offset |> List_.map show_offset |> String.concat ""
+
+let show_lval { base; offset } = show_base base ^ show_offset_list offset
 
 let offset_of_IL (o : IL.offset) =
   match !hook_offset_of_IL with
@@ -328,7 +330,7 @@ let rec show_source { call_trace; label; precondition } =
     Range.content_at_range pm.path.internal_path_to_content r
   in
   let matched_line =
-    let loc1, _ = pm.Pattern_match.range_loc in
+    let loc1, _ = pm.range_loc in
     loc1.Tok.pos.line
   in
   let num_calls = length_of_call_trace call_trace in
@@ -726,23 +728,24 @@ let taints_of_pms ~incoming pms =
     3
   in
   (* Since labels can have a 'requires' constraint, we need to try adding
-   * more labels until we reach a fixpoint. E.g., we could have a PM adding
-   * label 'A', and another PM adding label 'B' but requiring 'A', so until
-   * we add 'A' to the taint set we cannot add 'B'.
-   * alt: Top-sort and then a fold ? *)
-  let rec go i taints pms_i =
+     more labels until we reach a fixpoint. E.g., we could have a PM adding
+     label 'A', and another PM adding label 'B' but requiring 'A', so until
+     we add 'A' to the taint set we cannot add 'B'.
+
+     Note that if 'incoming' contains a taint variable, then any labeled PM
+     will succeed using that variable as a precondition. But there may another
+     PM that would allow us to get the same label unconditionally. Hence we
+     reconsider all the PMs in every iteration. *)
+  let rec go i taints =
     if i >= max_ITERS then taints
     else
       let incoming = taints |> Taint_set.union incoming in
-      let new_taint_list, pms_left =
-        pms_i |> Common2.fpartition (taint_of_pm ~incoming)
+      let new_taint_list = pms |> List_.filter_map (taint_of_pm ~incoming) in
+      let taints' =
+        Taint_set.of_list new_taint_list |> Taint_set.union taints
       in
-      match new_taint_list with
-      | [] -> taints
-      | _ :: _ ->
-          let taints' =
-            Taint_set.of_list new_taint_list |> Taint_set.union taints
-          in
-          go (i + 1) taints' pms_left
+      if Taint_set.cardinal taints' > Taint_set.cardinal taints then
+        go (i + 1) taints'
+      else taints'
   in
-  go 0 Taint_set.empty pms
+  go 0 Taint_set.empty

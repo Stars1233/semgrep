@@ -1,5 +1,5 @@
 (* core algorithm, using AST-based or basic or regex fix strategy *)
-val render_fix : Pattern_match.t -> Textedit.t option
+val render_fix : Core_match.t -> Textedit.t option
 
 (* Produce the fixes for the list of matches. Currently used for tests but
  * also in the Pre_post_core_scan.Autofix_processor now that we handle
@@ -7,6 +7,8 @@ val render_fix : Pattern_match.t -> Textedit.t option
  *)
 val produce_autofixes :
   Core_result.processed_match list -> Core_result.processed_match list
+
+val produce_autofix : Core_result.processed_match -> Core_result.processed_match
 
 (* Apply the fix for the list of matches to the given file, returning the
    resulting file contents. Currently used only for tests.

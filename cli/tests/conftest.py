@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from functools import partial
@@ -44,6 +45,7 @@ import pytest
 from ruamel.yaml import YAML
 from tests import fixtures
 from tests.semgrep_runner import SemgrepRunner
+from tests.semgrep_runner import USE_OSEMGREP
 
 from semgrep import __VERSION__
 from semgrep.cli import cli
@@ -71,9 +73,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Filter test execution to tests that use pytest-snapshot",
     )
 
+    parser.addoption(
+        "--run-lockfileless",
+        action="store_true",
+        default=False,
+        help="Include tests marked as requiring lockfileless environment dependencies.",
+    )
+
 
 # ???
-def pytest_collection_modifyitems(items: pytest.Item, config: pytest.Config) -> None:
+def pytest_collection_modifyitems(
+    items: List[pytest.Item], config: pytest.Config
+) -> None:
     if config.getoption("--run-only-snapshots"):
         selected_items: List[pytest.Item] = []
         deselected_items: List[pytest.Item] = []
@@ -88,6 +99,12 @@ def pytest_collection_modifyitems(items: pytest.Item, config: pytest.Config) -> 
 
         config.hook.pytest_deselected(items=deselected_items)
         items[:] = selected_items
+
+    skip_lockfileless = pytest.mark.skip(reason="need --run-lockfileless to run")
+    if not config.getoption("--run-lockfileless"):
+        for item in items:
+            if "requires_lockfileless_deps" in item.keywords:
+                item.add_marker(skip_lockfileless)
 
 
 ##############################################################################
@@ -191,34 +208,6 @@ def _clean_output_if_json(output_json: str, clean_fingerprint: bool) -> str:
     return json.dumps(output, indent=2, sort_keys=True)
 
 
-def _clean_output_if_sarif(output_json: str) -> str:
-    try:
-        output = json.loads(output_json)
-    except json.decoder.JSONDecodeError:
-        return output_json
-
-    # Rules are logically a set so the JSON list's order doesn't matter
-    # we make the order deterministic here so that snapshots match across runs
-    # the proper solution will be https://github.com/joseph-roitman/pytest-snapshot/issues/14
-    try:
-        output["runs"][0]["tool"]["driver"]["rules"] = sorted(
-            output["runs"][0]["tool"]["driver"]["rules"],
-            key=lambda rule: str(rule["id"]),
-        )
-    except (KeyError, IndexError):
-        pass
-
-    # Semgrep version is included in sarif output. Verify this independently so
-    # snapshot does not need to be updated on version bump
-    try:
-        assert output["runs"][0]["tool"]["driver"]["semanticVersion"] == __VERSION__
-        output["runs"][0]["tool"]["driver"]["semanticVersion"] = "placeholder"
-    except (KeyError, IndexError):
-        pass
-
-    return json.dumps(output, indent=2, sort_keys=True)
-
-
 Maskers = Iterable[Union[str, re.Pattern, Callable[[str], str]]]
 
 
@@ -259,7 +248,6 @@ def mask_floats(text_output: str) -> str:
 # ProTip: make sure your regexps can't match JSON quotes so as to keep any
 # JSON parseable after a substitution!
 ALWAYS_MASK: Maskers = (
-    _clean_output_if_sarif,
     __VERSION__,
     re.compile(r"python (\d+[.]\d+[.]\d+[ ]+)"),
     re.compile(r'SEMGREP_SETTINGS_FILE="(.+?)"'),
@@ -299,6 +287,14 @@ def mask_variable_text(
     # but sometimes we want fingerprint masking and sometimes not
     text = _clean_output_if_json(text, clean_fingerprint)
     return text
+
+
+# GIT_CONFIG_NOGLOBAL=true prevents reading the user's git configuration
+# which varies from one developer to another and causes variable output.
+def create_git_repo() -> None:
+    os.system("GIT_CONFIG_NOGLOBAL=true git init")
+    os.system("GIT_CONFIG_NOGLOBAL=true git add .")
+    os.system("GIT_CONFIG_NOGLOBAL=true git commit -m 'add files'")
 
 
 ##############################################################################
@@ -343,9 +339,6 @@ class SemgrepResult:
         # This is a list of pairs (title, data) containing different
         # kinds of output to put into the snapshot.
         sections = {
-            "command": mask_variable_text(
-                self.command, mask, clean_fingerprint=self.clean_fingerprint
-            ),
             "exit code": self.exit_code,
             "stdout - plain": self.strip_color(stdout),
             "stderr - plain": self.strip_color(stderr),
@@ -366,16 +359,17 @@ class SemgrepResult:
 
     def print_debug_info(self) -> None:
         print(
-            "=== to reproduce (run with `pytest --pdb` to suspend while temp dirs exist)"
+            "=== to reproduce (run with `pytest --pdb` to suspend while temp dirs exist)",
+            file=sys.stderr,
         )
-        print(f"$ cd {os.getcwd()}")
-        print(f"$ {self.command}")
-        print("=== exit code")
-        print(self.exit_code)
-        print("=== stdout")
-        print(self.stdout)
-        print("=== stderr")
-        print(self.stderr)
+        print(f"$ cd {os.getcwd()}", file=sys.stderr)
+        print(f"$ {self.command}", file=sys.stderr)
+        print("=== exit code", file=sys.stderr)
+        print(self.exit_code, file=sys.stderr)
+        print("=== stdout", file=sys.stderr)
+        print(self.stdout, file=sys.stderr)
+        print("=== stderr", file=sys.stderr)
+        print(self.stderr, file=sys.stderr)
 
     def __iter__(self):
         """For backwards compat with usages like `stdout, stderr = run_semgrep(...)`"""
@@ -385,7 +379,7 @@ class SemgrepResult:
 
 # Implements the 'RunSemgrep' function type (type checking is done
 # right after this definition) defined in 'fixtures.py'
-#
+# coupling: if you add params, you'll need to also modify fixtures.py
 def _run_semgrep(
     config: Optional[Union[str, Path, List[str]]] = None,
     *,
@@ -398,14 +392,18 @@ def _run_semgrep(
     env: Optional[Dict[str, str]] = None,
     assert_exit_code: Union[None, int, Set[int]] = 0,
     force_color: Optional[bool] = None,
-    assume_targets_dir: bool = True,  # See e2e/test_dependency_aware_rule.py for why this is here
+    # See e2e/test_dependency_aware_rule.py for why this is here
+    assume_targets_dir: bool = True,
     force_metrics_off: bool = True,
     stdin: Optional[str] = None,
     clean_fingerprint: bool = True,
-    use_click_runner: bool = False,  # Deprecated! see semgrep_runner.py toplevel comment
+    # Deprecated! see semgrep_runner.py toplevel comment
+    use_click_runner: bool = False,
     prepare_workspace: Callable[[], None] = lambda: None,
     teardown_workspace: Callable[[], None] = lambda: None,
     context_manager: Optional[ContextManager] = None,
+    is_logged_in_weak=False,
+    osemgrep_force_project_root: Optional[str] = None,
 ) -> SemgrepResult:
     """Run the semgrep CLI.
 
@@ -447,8 +445,29 @@ def _run_semgrep(
             if force_metrics_off and "SEMGREP_SEND_METRICS" not in env:
                 env["SEMGREP_SEND_METRICS"] = "off"
 
+            # In https://github.com/semgrep/semgrep-proprietary/pull/2605
+            # we started to gate some JSON fields with an is_logged_in check
+            # and certain tests needs those JSON fields hence this parameter
+            if is_logged_in_weak and "SEMGREP_APP_TOKEN" not in env:
+                env["SEMGREP_APP_TOKEN"] = "fake_token"
+
             if options is None:
                 options = []
+
+            # This is a hack to make osemgrep's new semgrepignore behavior
+            # compatible with pysemgrep when the current folder is not
+            # the project's root.
+            # - pysemgrep will use the .semgrepignore in the current folder
+            # - osemgrep will locate the project root and use all the
+            #   .semgrepignore and .gitignore files it finds in the project.
+            # In tests, we want to ignore the project-wide's semgrepignore.
+            # This is what the '--project-root .' option achieves.
+            if (
+                (subcommand is None or subcommand == "scan")
+                and USE_OSEMGREP
+                and osemgrep_force_project_root
+            ):
+                options.extend(["--project-root", osemgrep_force_project_root])
 
             if strict:
                 options.append("--strict")
@@ -552,7 +571,15 @@ def unique_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 # Provide a run_semgrep function with alternate defaults
 _run_strict_semgrep_on_basic_targets_with_json_output: fixtures.RunSemgrep = partial(
-    _run_semgrep, strict=True, target_name="basic", output_format=OutputFormat.JSON
+    _run_semgrep,
+    strict=True,
+    target_name="basic",
+    output_format=OutputFormat.JSON,
+    # In the setup we use, 'targets' is a symlink in a temporary folder.
+    # It's incompatible with the project root being '.' because
+    # the real path of the project root must be a prefix of the real path
+    # of the scanning root.
+    osemgrep_force_project_root="targets/..",
 )
 
 

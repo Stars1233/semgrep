@@ -786,7 +786,8 @@ let parse_aws_request env key value : (Rule.aws_request, Rule_error.t) result =
   in
   let/ access_key_id = take_key request_dict env parse_string "access_key_id" in
   let/ region = take_key request_dict env parse_string "region" in
-  Ok Rule.{ secret_access_key; access_key_id; region }
+  let/ session_token = take_opt request_dict env parse_string "session_token" in
+  Ok Rule.{ secret_access_key; access_key_id; region; session_token }
 
 let parse_aws_validator env key value : (Rule.validator, Rule_error.t) result =
   let/ validator_dict = parse_dict env key value in
@@ -820,21 +821,22 @@ let parse_ecosystem env key value =
   | _ -> error_at_key env.id key "Non-string data for ecosystem?"
 
 let parse_dependency_pattern key env value :
-    (R.dependency_pattern, Rule_error.t) result =
+    (SCA_pattern.t, Rule_error.t) result =
   let/ rd = parse_dict env key value in
   let/ ecosystem = take_key rd env parse_ecosystem "namespace" in
   let/ package_name = take_key rd env parse_string "package" in
+  let/ version_str = take_key rd env parse_string "version" in
   let/ version_constraints =
-    (* TODO: version parser *)
-    take_key rd env parse_string "version"
-    |> Result.map (fun _ ->
-           Dependency.And
-             [ { version = Other "not implemented"; constraint_ = Eq } ])
+    try Ok (Parse_SCA_version.parse_constraints version_str) with
+    | Parse_SCA_version.Error error_str ->
+        error_at_key env.id key
+          (spf "bad version constraint format for %s, error = %s" version_str
+             error_str)
   in
-  Ok R.{ ecosystem; package_name; version_constraints }
+  Ok SCA_pattern.{ ecosystem; package_name; version_constraints }
 
 let parse_dependency_formula env key value :
-    (R.dependency_formula, Rule_error.t) result =
+    (R.sca_dependency_formula, Rule_error.t) result =
   let/ rd = parse_dict env key value in
   if Hashtbl.mem rd.h "depends-on-either" then
     take_key rd env
@@ -956,7 +958,7 @@ let check_version_compatibility rule_id ~min_version ~max_version =
    products. This basically just copies the logic of
    semgrep/cli/src/semgrep/rule.py::Rule.product *)
 let parse_product (metadata : J.t option)
-    (dep_formula_opt : R.dependency_formula option) :
+    (dep_formula_opt : R.sca_dependency_formula option) :
     Semgrep_output_v1_t.product =
   match dep_formula_opt with
   | Some _ -> `SCA
@@ -987,7 +989,19 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
   let/ max_version = take_opt_no_env rd parse_version "max-version" in
   let/ () = check_version_compatibility rule_id ~min_version ~max_version in
 
-  let/ languages = take_no_env rd parse_string_wrap_list_no_env "languages" in
+  let/ languages_opt =
+    take_opt_no_env rd parse_string_wrap_list_no_env "languages"
+  in
+  let/ languages =
+    match languages_opt with
+    | Some languages -> Ok languages
+    (* TODO: join-mode does not have languages and is not recognized right now
+     * by semgrep-core
+     * TODO? steps-mode or rules using just pattern-regex could also skip
+     * the languages section? (and use target selector instead)
+     *)
+    | None -> H.error rule_id tok "missing languages"
+  in
   let/ options_opt, options_key =
     let/ options = take_opt_no_env rd (parse_options rule_id) "options" in
     match options with
@@ -1223,7 +1237,7 @@ let parse_fake_xpattern xlang str =
 (* Useful for tests *)
 (*****************************************************************************)
 
-let parse file =
+let parse (file : Fpath.t) : (Rule.rules, Rule_error.t) result =
   let/ xs, _skipped = parse_file ~error_recovery:false file in
   (* The skipped rules include Apex rules and other rules that are always
      skippable. *)

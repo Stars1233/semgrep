@@ -87,7 +87,7 @@ let run_semgrep ?(targets : Fpath.t list option) ?rules ?git_ref
         let core_run_func =
           let pro_intrafile =
             session.user_settings.pro_intrafile
-            && Semgrep_settings.has_api_token ()
+            && Semgrep_login.is_logged_in_weak ()
           in
           match !Core_runner.hook_mk_pro_core_run_for_osemgrep with
           | Some pro_scan_func when pro_intrafile ->
@@ -138,8 +138,7 @@ let run_semgrep ?(targets : Fpath.t list option) ?rules ?git_ref
                        available, as the user is not logged in, or there is no \
                        pro binary available. Running with the OSS engine \
                        instead.");
-              Core_runner.mk_core_run_for_osemgrep
-                (Core_scan.scan (session.caps :> Core_scan.caps))
+              Core_runner.mk_core_run_for_osemgrep (Core_scan.scan session.caps)
         in
         Logs.debug (fun m ->
             m "Running Semgrep with %d rules" (List.length rules));

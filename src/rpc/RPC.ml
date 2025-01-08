@@ -10,12 +10,6 @@ module Out = Semgrep_output_v1_j
  *)
 
 (*****************************************************************************)
-(* Types *)
-(*****************************************************************************)
-
-exception InvalidRPCArgument of string
-
-(*****************************************************************************)
 (* Dispatcher *)
 (*****************************************************************************)
 
@@ -25,36 +19,22 @@ let handle_call (caps : < Cap.exec ; Cap.tmp >) :
       let modified_file_count, fixed_lines = RPC_return.autofix dryrun edits in
       Ok (`RetApplyFixes { modified_file_count; fixed_lines })
   | `CallSarifFormat
-      {
-        hide_nudge;
-        engine_label;
-        rules;
-        cli_matches;
-        cli_errors;
-        show_dataflow_traces = Some show_dataflow_traces;
-      } ->
+      ( ctx,
+        {
+          hide_nudge;
+          engine_label;
+          rules;
+          cli_matches;
+          cli_errors;
+          show_dataflow_traces;
+        } ) ->
       let output, format_time_seconds =
         RPC_return.sarif_format
           (caps :> < Cap.tmp >)
-          hide_nudge engine_label show_dataflow_traces rules cli_matches
+          rules ctx hide_nudge engine_label show_dataflow_traces cli_matches
           cli_errors
       in
       Ok (`RetSarifFormat { output; format_time_seconds })
-  (* There shouldn't really be optional fields, but because they were
-   *  added later, they had to be optional not to break backward
-   *  compatibility *)
-  | `CallSarifFormat
-      {
-        hide_nudge = _;
-        engine_label = _;
-        show_dataflow_traces = None;
-        rules = _;
-        cli_matches = _;
-        cli_errors = _;
-      } ->
-      raise
-        (InvalidRPCArgument
-           "The field show_dataflow_traces must be populated in CallSarifFormat")
   | `CallContributions ->
       let contribs = RPC_return.contributions (caps :> < Cap.exec >) in
       Ok (`RetContributions contribs)
@@ -64,11 +44,13 @@ let handle_call (caps : < Cap.exec ; Cap.tmp >) :
   | `CallValidate path ->
       let valid = RPC_return.validate path in
       Ok (`RetValidate valid)
-  | `CallResolveDependencies manifests -> (
+  | `CallResolveDependencies dependency_sources -> (
       match !RPC_return.hook_resolve_dependencies with
       | Some resolve_dependencies ->
           let resolved =
-            resolve_dependencies (caps :> < Cap.exec ; Cap.tmp >) manifests
+            resolve_dependencies
+              (caps :> < Cap.exec ; Cap.tmp >)
+              dependency_sources
           in
           Ok (`RetResolveDependencies resolved)
       | None ->

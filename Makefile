@@ -269,8 +269,18 @@ install-deps-for-semgrep-core:
 # of installing all the packages in one shot and detecting possible
 # version conflicts.
 # OPAMSOLVERTIMEOUT default is 60 but seems not enough
+#
+# TODO: We use `--assume-depexts` because as of 2024-11-13 brew
+# has moved off `pkg-config`. When you install `pkg-config` you
+# get `pkgconf` instead, which OCaml doesn't recognize as satisfying
+# the dependency though it contains the same elements. This has been
+# reported to brew via https://github.com/ocaml/opam-repository/issues/26876.
+# We can remove it if that issue is resolved.
+# Per the note above install-deps-ALPINE-for-semgrep-core, we may want
+# to keep it and add `--no-cache`
 install-opam-deps:
-	OPAMSOLVERTIMEOUT=1200 opam install -y --deps-only $(REQUIRED_DEPS)
+	opam update -y
+	OPAMSOLVERTIMEOUT=1200 opam install -y --assume-depexts --deps-only $(REQUIRED_DEPS)
 
 # This will fail if semgrep.opam isn't up-to-date (in git),
 # and dune isn't installed yet. You can always install dune with
@@ -623,7 +633,7 @@ DOCKER_IMAGE=semgrep/semgrep:develop
 
 # If you get parsing errors while running this command, maybe you have an old
 # cached version of the docker image. You can invalidate the cache with
-#   'docker rmi returntocorp/semgrep:develop`
+#   'docker rmi semgrep/semgrep:develop`
 check_with_docker:
 	docker run --rm -v "${PWD}:/src" $(DOCKER_IMAGE) semgrep $(SEMGREP_ARGS)
 

@@ -23,7 +23,7 @@ type tainted_tokens = tainted_token list [@@deriving show]
   * 'sink(x)' (here `a` is the actual argument passed to `foo`, and `x` could be
   *  the formal argument of `foo`). *)
 type 'spec call_trace =
-  | PM of Pattern_match.t * 'spec
+  | PM of Core_match.t * 'spec
       (** A direct match. The `'spec` would typically contain the pattern that
         * was used to produce the match, e.g. one of the `pattern-sources`.  *)
   | Call of AST_generic.expr * tainted_tokens * 'spec call_trace
@@ -31,7 +31,7 @@ type 'spec call_trace =
 
 val show_call_trace : ('spec -> string) -> 'spec call_trace -> string
 
-type arg = { name : string; index : int } [@@deriving eq, ord]
+type arg = { name : IL.name; index : int } [@@deriving eq, ord]
 (** A formal argument of a function given by its name and it's index/position. *)
 
 val show_arg : arg -> string
@@ -53,6 +53,7 @@ type offset =
 
 val compare_offset : offset -> offset -> int
 val show_offset : offset -> string
+val show_offset_list : offset list -> string
 val offset_of_IL : IL.offset -> offset
 val offset_of_rev_IL_offset : rev_offset:IL.offset list -> offset list
 
@@ -64,7 +65,12 @@ val rev_IL_offset_of_offset : offset list -> IL.offset list option
   * (if there is no `Oany`).
   *)
 
-type lval = { base : base; offset : offset list }
+type lval = {
+  base : base;
+  offset : offset list;
+      (** An offset `.a.b.c` is encoded as `[.a; .b; .c]`, note the difference
+          wrt 'IL.offset', this offset list is **not** reversed! *)
+}
 (** A restriction of 'IL.lval', the l-values that are in the scope of a
  * function/method, and on which we can track taint:
  *
@@ -159,8 +165,8 @@ and taint = { orig : orig; tokens : tainted_tokens }
 (** At a given program location, taint is given by its origin (i.e. 'orig') and
  * the path it took from that origin to the current location (i.e. 'tokens'). *)
 
-val trace_of_pm : Pattern_match.t * 'a -> 'a call_trace
-val pm_of_trace : 'a call_trace -> Pattern_match.t * 'a
+val trace_of_pm : Core_match.t * 'a -> 'a call_trace
+val pm_of_trace : 'a call_trace -> Core_match.t * 'a
 
 (* TODO: Move 'Dataflow_tainting.subst_in_precondition' here, parameterized
      by 'arg_to_taints'. *)
@@ -210,7 +216,7 @@ val solve_precondition :
 val taints_satisfy_requires : taint list -> Rule.precondition -> bool
 
 val taints_of_pms :
-  incoming:taints -> (Pattern_match.t * Rule.taint_source) list -> taints
+  incoming:taints -> (Core_match.t * Rule.taint_source) list -> taints
 
 val show_taints : taints -> string
 
@@ -218,5 +224,5 @@ val show_taints : taints -> string
 (* Taint-oriented comparison functions for non-taint types *)
 (*****************************************************************************)
 
-val compare_matches : Pattern_match.t -> Pattern_match.t -> int
+val compare_matches : Core_match.t -> Core_match.t -> int
 val compare_metavar_env : Metavariable.bindings -> Metavariable.bindings -> int

@@ -20,6 +20,10 @@ open IL
 (* Prelude *)
 (*****************************************************************************)
 
+(***********************************************)
+(* L-values *)
+(***********************************************)
+
 let exp_of_arg arg =
   match arg with
   | Unnamed exp -> exp
@@ -90,6 +94,23 @@ let is_pro_resolved_global name =
   | None ->
       false
 
+(* HACK: Because we don't have a "Class" type, classes have themselves as types. *)
+let is_class_name (name : name) =
+  match (!(name.id_info.id_resolved), !(name.id_info.id_type)) with
+  | Some resolved1, Some { t = TyN (Id (_, { id_resolved; _ })); _ } -> (
+      match !id_resolved with
+      | None -> false
+      | Some resolved2 ->
+          (* If 'name' has type 'name' then we assume it's a class. *)
+          AST_generic.equal_resolved_name resolved1 resolved2)
+  | _, None
+  | _, Some _ ->
+      false
+
+(***********************************************)
+(* L-values *)
+(***********************************************)
+
 let lval_of_var var = { IL.base = Var var; rev_offset = [] }
 
 let is_dots_offset offset =
@@ -154,6 +175,22 @@ let orig_of_node = function
   | NTodo _ ->
       None
 
+(***********************************************)
+(* CFG *)
+(***********************************************)
+
+let rec reachable_nodes fun_cfg =
+  let main_nodes = CFG.reachable_nodes fun_cfg.cfg in
+  let lambdas_nodes =
+    fun_cfg.lambdas |> NameMap.to_seq
+    |> Seq.map (fun (_lname, lcfg) -> reachable_nodes lcfg)
+  in
+  Seq.concat (Seq.cons main_nodes lambdas_nodes)
+
+(***********************************************)
+(* Lambdas *)
+(***********************************************)
+
 let lval_is_lambda lambdas_cfgs lval =
   match lval with
   | { base = Var name; rev_offset = [] } ->
@@ -162,15 +199,3 @@ let lval_is_lambda lambdas_cfgs lval =
   | { base = Var _ | VarSpecial _ | Mem _; rev_offset = _ } ->
       (* Lambdas are only assigned to plain variables without any offset. *)
       None
-
-let rec reachable_nodes fun_cfg =
-  let get_reachable_nodes cfg =
-    cfg.CFG.reachable |> CFG.NodeiSet.to_seq
-    |> Seq.map cfg.CFG.graph#nodes#assoc
-  in
-  let main_nodes = get_reachable_nodes fun_cfg.cfg in
-  let lambdas_nodes =
-    fun_cfg.lambdas |> NameMap.to_seq
-    |> Seq.map (fun (_lname, lcfg) -> reachable_nodes lcfg)
-  in
-  Seq.concat (Seq.cons main_nodes lambdas_nodes)

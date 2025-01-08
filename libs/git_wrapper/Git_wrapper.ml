@@ -87,7 +87,6 @@ type blob_with_extra = { blob : blob; path : Fpath.t; size : int }
 let commit_digest = Commit.digest
 let commit_author = Commit.author
 let hex_of_hash = Hash.to_hex
-let hash_of_hex = Hash.of_hex
 let blob_digest = Blob.digest
 let string_of_blob = Blob.to_string
 
@@ -100,17 +99,6 @@ exception Error of string
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
-
-let hash_to_yojson hash = `String (hex_of_hash hash)
-
-let hash_of_yojson yojson =
-  match yojson with
-  | `String hex -> Ok (hash_of_hex hex)
-  | json ->
-      Error
-        (Printf.sprintf
-           "Could not convert to Hash.t expected `String, received %s"
-           Yojson.Safe.(to_string json))
 
 (* diff unified format regex:
  * https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html#Detailed-Unified
@@ -266,9 +254,9 @@ let blobs_by_commit objects commits =
 (*****************************************************************************)
 
 (* Similar to Sys.command, but specific to git *)
-let command (_caps_exec : < Cap.exec >) (args : Cmd.args) : string =
+let command (caps : < Cap.exec >) (args : Cmd.args) : string =
   let cmd : Cmd.t = (git, args) in
-  match UCmd.string_of_run ~trim:true cmd with
+  match CapExec.string_of_run caps#exec ~trim:true cmd with
   | Ok (str, (_, `Exited 0)) -> str
   | Ok _
   | Error (`Msg _) ->
@@ -322,93 +310,29 @@ let string_of_ls_files_kind (kind : ls_files_kind) =
   | Cached -> "--cached"
   | Others -> "--others"
 
+(* Parse the output of 'git ls-files -z' *)
+let parse_nul_separated_list_of_files str =
+  String.split_on_char '\000' str |> List.filter (( <> ) "")
+
 let ls_files ?(cwd = Fpath.v ".") ?(exclude_standard = false) ?(kinds = [])
     root_paths =
   let roots = root_paths |> List_.map Fpath.to_string in
   let kinds = kinds |> List_.map string_of_ls_files_kind in
   let cmd =
     ( git,
-      [ "-C"; !!cwd; "ls-files" ]
+      (* Unlike the default, '-z' causes the file path to not be quoted
+         when they contain special characters, simplifying parsing. *)
+      [ "-C"; !!cwd; "ls-files"; "-z" ]
       @ kinds
       @ flag "--exclude-standard" exclude_standard
       @ roots )
   in
   let files =
-    match UCmd.lines_of_run ~trim:true cmd with
-    | Ok (files, (_, `Exited 0)) -> files
+    match UCmd.string_of_run ~trim:true cmd with
+    | Ok (data, (_, `Exited 0)) -> parse_nul_separated_list_of_files data
     | _ -> raise (Error "Could not get files from git ls-files")
   in
   files |> Fpath_.of_strings
-
-let append_slash_to_dir_path path = Fpath.add_seg path ""
-
-(*
-   Make an absolute path relative to a root folder if possible.
-
-   This returns a relative path if possible, otherwise falls back to an
-   absolute path. It's possible to obtain a relative path if both paths
-   are relative (to the same implicit folder) or if they're both absolute
-   and share the same filesystem root ('/' on Unix or a volume name on
-   Windows).
-
-   TODO: move to Fpath_?
-*)
-let relativize_if_possible ~abs_cwd abs_path =
-  if not (Fpath.is_abs abs_cwd) then
-    invalid_arg
-      (spf
-         "Git_wrapper.relativize_if_possible: abs_cwd must be an absolute path \
-          but we received %s"
-         !!abs_cwd);
-  if not (Fpath.is_abs abs_path) then
-    invalid_arg
-      (spf
-         "Git_wrapper.relativize_if_possible: abs_path must be an absolute \
-          path but we received %s"
-         !!abs_path);
-  match Fpath.relativize ~root:(append_slash_to_dir_path abs_cwd) abs_path with
-  | Some rel_path -> rel_path
-  | None -> abs_path
-
-(*
-   List files relative to the current directory which may be outside of
-   a git project.
-
-   This is something git doesn't allow directly, so we need to perform
-   path conversions. The project root must be provided because it's somewhat
-   costly to obtain.
-*)
-let ls_files_relative ?exclude_standard ?kinds ~(project_root : Rpath.t)
-    root_paths =
-  (* Both project_root and sys_cwd are absolute, physical paths *)
-  let project_root = Rpath.to_fpath project_root in
-  let sys_cwd = Sys.getcwd () |> Fpath.v in
-  let abs_root_paths =
-    root_paths
-    |> List_.map (fun path ->
-           (* git accepts absolute paths to scanning roots but not if they
-              contain relative segments
-              such as '..':
-                OK: /home/user/proj/src
-                Rejected: ../proj/src
-           *)
-           Fpath.(sys_cwd // path |> normalize))
-  in
-  (* List paths relative to the project root.
-
-     Git returns paths that are relative to 'cwd' which must be within the
-     project. The following should work even if 'project_root' is a subfolder
-     in the git project but we're not counting on it. *)
-  let proj_rel_paths =
-    ls_files ~cwd:project_root ?exclude_standard ?kinds abs_root_paths
-  in
-  let rel_paths =
-    proj_rel_paths
-    |> List_.map (fun proj_rel_path ->
-           relativize_if_possible ~abs_cwd:sys_cwd
-             (project_root // proj_rel_path))
-  in
-  rel_paths
 
 (* TODO: somehow avoid error message on stderr in case this is not a git repo *)
 let project_root_for_files_in_dir dir =

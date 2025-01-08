@@ -33,8 +33,10 @@ def apply_fixes(args: out.ApplyFixesParams) -> Optional[out.ApplyFixesReturn]:
     return ret.value
 
 
-def sarif_format(args: out.SarifFormatParams) -> Optional[out.RetSarifFormat]:
-    call = out.FunctionCall(out.CallSarifFormat(args))
+def sarif_format(
+    ctx: out.FormatContext, other: out.SarifFormatParams
+) -> Optional[out.RetSarifFormat]:
+    call = out.FunctionCall(out.CallSarifFormat((ctx, other)))
     ret: Optional[out.RetSarifFormat] = rpc_call(call, out.RetSarifFormat)
     if ret is None:
         # No real point in logging here. We log for each of the conditions that
@@ -62,8 +64,8 @@ def validate(fp: out.Fpath) -> bool:
 
 
 def resolve_dependencies(
-    args: List[out.Manifest],
-) -> Optional[List[Tuple[out.Manifest, out.ResolutionResult]]]:
+    args: List[out.DependencySource],
+) -> Optional[List[Tuple[out.DependencySource, out.ResolutionResult]]]:
     call = out.FunctionCall(out.CallResolveDependencies(args))
     ret: Optional[out.RetResolveDependencies] = rpc_call(
         call, out.RetResolveDependencies

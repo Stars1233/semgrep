@@ -144,6 +144,7 @@ let should_match_call = function
   (* e.g. `super()` in JS constructor. Should be Java too, but Java doesn't use
    * IdSpecial for super calls *)
   | G.Super
+  | G.Cls
   | G.Self
   | G.Parent
   (* JS `require("fs")` *)
@@ -1063,9 +1064,13 @@ and m_expr ?(is_root = false) ?(arguments_have_changed = true) a b =
    *)
   | ( G.DotAccess (({ e = G.DotAccessEllipsis (a1_1, _a1_2); _ } as a1), at, a2),
       B.DotAccess (b1, bt, b2) ) ->
+      (* opti: Match field name first so we can bail quickly if it doesn't
+       * match. This can allow us to avoid a relatively expensive match between
+       * `a1` and `b1`, particularly when the target is a long chain of
+       * `a.b.c.d.e` etc. and the pattern is of the form `$X. ... .foo`. *)
+      let* () = m_field_name a2 b2 in
       let* () = m_expr a1 b1 >||> m_expr a1_1 b1 in
-      let* () = m_tok at bt in
-      m_field_name a2 b2
+      m_tok at bt
   | G.DotAccess (a1, at, a2), B.DotAccess (b1, bt, b2) ->
       m_expr a1 b1 >>= fun () ->
       m_tok at bt >>= fun () -> m_field_name a2 b2
@@ -1426,6 +1431,7 @@ and m_special a b =
   | G.This, B.This -> return ()
   | G.Super, B.Super -> return ()
   | G.Self, B.Self -> return ()
+  | G.Cls, B.Cls -> return ()
   | G.Parent, B.Parent -> return ()
   | G.Eval, B.Eval -> return ()
   | G.Typeof, B.Typeof -> return ()
@@ -1446,6 +1452,7 @@ and m_special a b =
   | G.This, _
   | G.Super, _
   | G.Self, _
+  | G.Cls, _
   | G.Parent, _
   | G.Eval, _
   | G.Typeof, _
@@ -2089,8 +2096,8 @@ and m_type_ a b =
    *
    * See the following for context about why this is done here, and not with
    * desugaring earlier in the pipeline:
-   * - https://github.com/returntocorp/semgrep/pull/5540
-   * - https://github.com/returntocorp/semgrep/pull/4682
+   * - https://github.com/semgrep/semgrep/pull/5540
+   * - https://github.com/semgrep/semgrep/pull/4682
    *)
   | G.TyN a1, B.TyExpr { e = N b1; _ } ->
       m_name a1 b1
@@ -3649,7 +3656,7 @@ and m_directive a b =
  * `require` nodes with the `ImportFrom` but instead added the `ImportFrom`.
  *
  * Having two places where the same symbol was defined complicated downstream
- * analysis. See https://github.com/returntocorp/semgrep/pull/6532 for some
+ * analysis. See https://github.com/semgrep/semgrep/pull/6532 for some
  * of the issues that it caused.
  *
  * So, in order to simplify naming and maintain the existing matching behavior,

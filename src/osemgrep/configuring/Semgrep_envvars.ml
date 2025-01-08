@@ -39,10 +39,27 @@ let%test_unit "Semgrep_envvars.(/)" =
   [%test_eq: Base.string] ("a/b/" / "c/d" / "foo.c") "a/b/c/d/foo.c"
 *)
 
-let env_opt var = Sys.getenv_opt var
+(*
+   Treat environment variables with an empty value as if they were unset.
+
+   Since OCaml doesn't provide an 'unsetenv' function (which exists in libc),
+   tests that that set environment variable temporarily can't unset them,
+   leaving them with the empty value instead.
+*)
+let env_opt var =
+  match Sys.getenv_opt var with
+  | Some "" -> None
+  | x -> x
+
+(*****************************************************************************)
+(* Don't use Sys.getenv* or Unix.getenv* starting from here!  *)
+(*****************************************************************************)
+(*
+   TODO: ensure that the whole application uses our 'env_opt' function.
+*)
 
 let env_or conv var default =
-  match Sys.getenv_opt var with
+  match env_opt var with
   | None -> default
   | Some x -> conv x
 
@@ -84,6 +101,7 @@ type t = {
   is_ci : bool;
   in_docker : bool;
   in_gh_action : bool;
+  sms_scan_id : string option;
   (* deprecated *)
   in_agent : bool;
   min_fetch_depth : int;
@@ -103,9 +121,11 @@ let of_current_sys_env () : t =
       (* In windows USERPROFILE=C:\Users\<user> *)
       if Sys.win32 then "USERPROFILE" else "XDG_CONFIG_HOME"
     in
-    match Sys.getenv_opt home_env_var with
+    match env_opt home_env_var with
     | Some x when Sys.is_directory x -> Fpath.v x
-    | _else_ -> Fpath.v (env_or (fun x -> x) "HOME" "/")
+    | Some _
+    | None ->
+        Fpath.v (env_or (fun x -> x) "HOME" "/")
   in
   let user_dot_semgrep_dir = user_home_dir / ".semgrep" in
   {
@@ -149,6 +169,7 @@ let of_current_sys_env () : t =
     is_ci = in_env "CI";
     in_docker = in_env "SEMGREP_IN_DOCKER";
     in_gh_action = in_env "GITHUB_WORKSPACE";
+    sms_scan_id = env_opt "SEMGREP_MANAGED_SCAN_ID";
     in_agent = in_env "SEMGREP_AGENT";
     min_fetch_depth = env_or int_of_string "SEMGREP_GHA_MIN_FETCH_DEPTH" 0;
     mock_using_registry = in_env "MOCK_USING_REGISTRY";

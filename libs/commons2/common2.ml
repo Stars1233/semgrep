@@ -1777,6 +1777,7 @@ let files_of_dir_or_files_no_vcs ext xs =
   xs
   |> List_.map (fun x ->
          if USys.is_directory x then
+           (* nosemgrep: forbid-exec *)
            UCmd.cmd_to_list
              ("find " ^ arg_symlink () ^ x ^ " -noleaf -type f -name \"*." ^ ext
             ^ "\"" ^ grep_dash_v_str)
@@ -2426,6 +2427,7 @@ let nblines_with_wc a = nblines_eff a
 
 let unix_diff file1 file2 =
   let cmd = (Cmd.Name "diff", [ "-u"; file1; file2 ]) in
+  (* nosemgrep: forbid-exec *)
   match UCmd.lines_of_run ~trim:true cmd with
   | Ok (xs, _status) -> xs
   | Error (`Msg s) -> failwith (spf "unix_diff problem: %s" s)
@@ -2563,7 +2565,7 @@ let sanity_check_files_and_adjust ext files =
            if not (file =~ ".*\\." ^ ext) then (
              pr2 ("warning: seems not a ." ^ ext ^ " file");
              false)
-           else if UFile.is_directory (Fpath.v file) then (
+           else if UFile.is_dir ~follow_symlinks:true (Fpath.v file) then (
              pr2 (spf "warning: %s is a directory" file);
              false)
            else true)
@@ -4964,7 +4966,7 @@ let _ = example
 let inits_of_absolute_dir dir =
   if not (is_absolute dir) then
     failwith (spf "inits_of_absolute_dir: %s is not an absolute path" dir);
-  if not (UFile.is_directory (Fpath.v dir)) then
+  if not (UFile.is_dir ~follow_symlinks:true (Fpath.v dir)) then
     failwith (spf "inits_of_absolute_dir: %s is not a directory" dir);
   let dir = chop_dirsymbol dir in
 
