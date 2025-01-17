@@ -270,13 +270,12 @@
           ## You can force versions of certain packages here
           # force the ocaml compiler to be 4.14.2 and from opam
           ocaml-base-compiler = "4.14.2";
-          # don't use bleeding edge cohttp
-          cohttp-lwt = "5.3.0";
           #TODO: needed for semgrep pro, should be in ../flake.nix instead
           #coupling: if you add one thing here, need to update also the
           # buildInputs overlay below
           junit_alcotest = "*";
           git-unix = "*";
+          mirage-runtime = "4.4.2";
           notty = "*";
           tsort = "*";
           # needed for tests
@@ -291,6 +290,10 @@
         } ./. opamQuery;
         scopeOverlay = final: prev: {
           # You can add overrides here
+          conf-pkg-config = prev.conf-pkg-config.overrideAttrs (prev: {
+            # We need to add the pkg-config path to the PATH so that dune can find it
+            nativeBuildInputs = prev.nativeBuildInputs ++ [ pkgs.pkg-config ];
+          });
           ${package} = prev.${package}.overrideAttrs (prev: {
             # Prevent the ocaml dependencies from leaking into dependent environments
             doNixSupport = false;
@@ -303,7 +306,7 @@
             ];
           });
         };
-        scope' = scope.overrideScope' scopeOverlay;
+        scope' = scope.overrideScope scopeOverlay;
 
         # for development
         devOpamPackages = builtins.attrValues

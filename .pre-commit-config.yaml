@@ -24,7 +24,6 @@ repos:
     hooks:
       - id: check-added-large-files
       - id: check-ast
-      - id: check-builtin-literals
       - id: check-case-conflict
       - id: check-docstring-first
       - id: check-executables-have-shebangs
@@ -43,7 +42,9 @@ repos:
       - id: destroyed-symlinks
       - id: detect-private-key
       - id: end-of-file-fixer
-        exclude: "^\\.github/workflows/.+|semgrep\\.opam|.gitmodules$"
+        # Exclude generated files.
+        # coupling: apply the same exclusions in semgrep-proprietary
+        exclude: "^\\.github/workflows/.+|semgrep\\.opam|.gitmodules|.dockerignore$"
       - id: fix-byte-order-marker
       - id: fix-encoding-pragma
         args: [--remove]
@@ -146,14 +147,21 @@ repos:
   # ----------------------------------------------------------
   # Extra hooks using additional_dependencies
   # ----------------------------------------------------------
-  - repo: local
-    hooks:
-      - id: gitignore-to-dockerignore
-        name: Convert .gitignore to .dockerignore
-        language: node
-        entry: gitignore-to-dockerignore
-        files: ^.(git|docker)ignore$
-        additional_dependencies: ["gitignore-to-dockerignore@2.0.0"]
+  # TODO: CI seems to be using the wrong version of
+  # gitignore-to-dockerignore since the result lacks the
+  # patterns derived from git submodules. This causes errors in
+  # the Pro-to-OSS sync job because Pro also generates this file
+  # but does so correctly. Maybe it's a caching bug. Compare
+  # with the pre-commit config in semgrep-proprietary.
+  #
+  #- repo: local
+  #  hooks:
+  #    - id: gitignore-to-dockerignore
+  #      name: Convert .gitignore to .dockerignore
+  #      language: node
+  #      entry: gitignore-to-dockerignore
+  #      files: ^.(git|docker)ignore$
+  #      additional_dependencies: ["gitignore-to-dockerignore@3.0.0"]
 
   # ----------------------------------------------------------
   # Simple docker-based hooks

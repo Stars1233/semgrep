@@ -1,14 +1,11 @@
-module In = Input_to_core_t
-module OutJ = Semgrep_output_v1_t
+module Out = Semgrep_output_v1_t
 
-(* Note that both of these together imply that In.product equals Out.product *)
-let _proof_that_input_subtype_output_product (x : In.product) : OutJ.product = x
-let _proof_that_output_subtype_input_product (x : OutJ.product) : In.product = x
+type t = Semgrep_output_v1_t.product [@@deriving show]
 
-(* TODO? move in Target.ml? *)
-let all = [ `SAST; `SCA; `Secrets ]
+let all : t list = [ `SAST; `SCA; `Secrets ]
 
-let of_cli_match (m : OutJ.cli_match) =
+let of_cli_match (m : Out.cli_match) : t =
+  (* alt: define a proper field in cli_match instead of abusing metadata *)
   let metadata_product_opt =
     try
       match Yojson.Basic.Util.member "product" m.extra.metadata with

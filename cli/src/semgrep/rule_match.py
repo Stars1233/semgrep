@@ -13,7 +13,6 @@ from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
-from uuid import UUID
 
 from attrs import evolve
 from attrs import field
@@ -31,7 +30,9 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
 from semgrep.util import get_lines_from_file
 from semgrep.util import get_lines_from_git_blob
+from semgrep.verbose_logging import getLogger
 
+logger = getLogger(__name__)
 
 CliUniqueKey = Tuple[str, str, int, int, str, Optional[str]]
 
@@ -89,6 +90,7 @@ class RuleMatch:
     # This could be derived, if we wanted to keep the rule as a field of the
     # match. Seems easier to just calculate it w/index
     match_formula_string: str = ""
+    blocked_by_app: bool = False
 
     # derived attributes
     lines: List[str] = field(init=False, repr=False)
@@ -341,7 +343,9 @@ class RuleMatch:
     def get_match_based_id(self) -> str:
         match_id = self.get_match_based_key()
         match_id_str = str(match_id)
-        return f"{hashlib.blake2b(str.encode(match_id_str)).hexdigest()}_{str(self.match_based_index)}"
+        code = f"{hashlib.blake2b(str.encode(match_id_str)).hexdigest()}_{str(self.match_based_index)}"
+        logger.debug(f"match_key = {match_id_str} match_id = {code}")
+        return code
 
     @code_hash.default
     def get_code_hash(self) -> str:
@@ -420,13 +424,6 @@ class RuleMatch:
         )
 
     @property
-    def uuid(self) -> UUID:
-        """
-        A UUID representation of ci_unique_key.
-        """
-        return UUID(hex=self.syntactic_id)
-
-    @property
     def is_validation_state_blocking(self) -> bool:
         if self.validation_state is None:
             return False
@@ -458,6 +455,9 @@ class RuleMatch:
         """
         Returns if this finding indicates it should block CI
         """
+        if self.blocked_by_app:
+            return True
+
         blocking = "block" in self.metadata.get("dev.semgrep.actions", ["block"])
         if "sca_info" in self.extra:
             if (

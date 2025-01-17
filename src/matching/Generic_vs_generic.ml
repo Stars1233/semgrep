@@ -144,6 +144,7 @@ let should_match_call = function
   (* e.g. `super()` in JS constructor. Should be Java too, but Java doesn't use
    * IdSpecial for super calls *)
   | G.Super
+  | G.Cls
   | G.Self
   | G.Parent
   (* JS `require("fs")` *)
@@ -1063,9 +1064,13 @@ and m_expr ?(is_root = false) ?(arguments_have_changed = true) a b =
    *)
   | ( G.DotAccess (({ e = G.DotAccessEllipsis (a1_1, _a1_2); _ } as a1), at, a2),
       B.DotAccess (b1, bt, b2) ) ->
+      (* opti: Match field name first so we can bail quickly if it doesn't
+       * match. This can allow us to avoid a relatively expensive match between
+       * `a1` and `b1`, particularly when the target is a long chain of
+       * `a.b.c.d.e` etc. and the pattern is of the form `$X. ... .foo`. *)
+      let* () = m_field_name a2 b2 in
       let* () = m_expr a1 b1 >||> m_expr a1_1 b1 in
-      let* () = m_tok at bt in
-      m_field_name a2 b2
+      m_tok at bt
   | G.DotAccess (a1, at, a2), B.DotAccess (b1, bt, b2) ->
       m_expr a1 b1 >>= fun () ->
       m_tok at bt >>= fun () -> m_field_name a2 b2
@@ -1426,6 +1431,7 @@ and m_special a b =
   | G.This, B.This -> return ()
   | G.Super, B.Super -> return ()
   | G.Self, B.Self -> return ()
+  | G.Cls, B.Cls -> return ()
   | G.Parent, B.Parent -> return ()
   | G.Eval, B.Eval -> return ()
   | G.Typeof, B.Typeof -> return ()
@@ -1446,6 +1452,7 @@ and m_special a b =
   | G.This, _
   | G.Super, _
   | G.Self, _
+  | G.Cls, _
   | G.Parent, _
   | G.Eval, _
   | G.Typeof, _
@@ -2089,8 +2096,8 @@ and m_type_ a b =
    *
    * See the following for context about why this is done here, and not with
    * desugaring earlier in the pipeline:
-   * - https://github.com/returntocorp/semgrep/pull/5540
-   * - https://github.com/returntocorp/semgrep/pull/4682
+   * - https://github.com/semgrep/semgrep/pull/5540
+   * - https://github.com/semgrep/semgrep/pull/4682
    *)
   | G.TyN a1, B.TyExpr { e = N b1; _ } ->
       m_name a1 b1
@@ -3622,8 +3629,8 @@ and m_directive a b =
            (function
              (* None here means that there is no local alias for the imported
               * name. *)
-             | _imported_name, None -> true
-             | _imported_name, Some _aliases -> false)
+             | G.Direct _ -> true
+             | Aliased _ -> false)
            imports ->
       m_normalized_imports a.d b.d
   | G.ImportAs (_, _, None) -> m_normalized_imports a.d b.d
@@ -3649,7 +3656,7 @@ and m_directive a b =
  * `require` nodes with the `ImportFrom` but instead added the `ImportFrom`.
  *
  * Having two places where the same symbol was defined complicated downstream
- * analysis. See https://github.com/returntocorp/semgrep/pull/6532 for some
+ * analysis. See https://github.com/semgrep/semgrep/pull/6532 for some
  * of the issues that it caused.
  *
  * So, in order to simplify naming and maintain the existing matching behavior,
@@ -3733,21 +3740,42 @@ and m_directive_vs_def a b =
 (* This is specific to JS/TS. See m_directive_vs_def. *)
 and m_import_vs_field a b =
   match (a, b) with
-  | ( (ida, aliasa),
+  | ( _,
       B.F
         {
           s =
             DefStmt
-              ( { name = EN (Id (idb, _)); attrs = []; tparams = None },
-                FieldDefColon { vinit = Some { e = N (Id (aliasb, _)); _ }; _ }
-              );
+              ( { name = EN (Id (id_b, _id_info_b)); attrs = []; tparams = None },
+                FieldDefColon
+                  {
+                    vinit = Some { e = N (Id (alias_id_b, alias_id_info_b)); _ };
+                    _;
+                  } );
           _;
         } ) -> (
-      let* () = m_ident ida idb in
-      match aliasa with
-      | None -> m_ident ida aliasb
-      | Some (aliasa, _) -> m_ident aliasa aliasb)
+      let id_a =
+        match a with
+        | G.Direct (id_a, _id_info_a) -> id_a
+        | Aliased (id_a, _) -> id_a
+      in
+      let alias_a =
+        match a with
+        | G.Direct _ -> None
+        | Aliased (_, alias_a) -> Some alias_a
+      in
+      let* () = m_ident id_a id_b in
+      match alias_a with
+      | None -> m_ident id_a alias_id_b
+      | Some aliasa -> m_ident_and_id_info aliasa (alias_id_b, alias_id_info_b))
   | _ -> fail ()
+
+and m_import_from_kind a b : tin -> tout =
+  let ident_a = H.id_of_import_from_kind a
+  and ident_b = H.id_of_import_from_kind b in
+  let alias_a = H.alias_opt_of_import_from_kind a
+  and alias_b = H.alias_opt_of_import_from_kind b in
+  m_ident_and_empty_id_info ident_a ident_b >>= fun () ->
+  m_option_none_can_match_some m_ident_and_id_info alias_a alias_b
 
 (* less-is-ok: a few of these below with the use of m_module_name_prefix and
  * m_option_none_can_match_some.
@@ -3758,21 +3786,21 @@ and m_directive_basic a b =
   (* metavar: import $LIB should bind $LIB to the full qualified name *)
   (* TODO Should we handle imports with multiple imported names here? Which
    * import would the metavar bind to? *)
-  | ( G.ImportFrom (a0, DottedName [], [ ((str, tok), a3) ]),
-      B.ImportFrom (b0, DottedName xs, [ (x, b3) ]) )
-    when Mvar.is_metavar_name str ->
+  | ( G.ImportFrom (a0, DottedName [], [ ifk_a ]),
+      B.ImportFrom (b0, DottedName xs, [ ifk_b ]) )
+    when Mvar.is_metavar_name (fst (H.id_of_import_from_kind ifk_a)) ->
+      let str, tok = H.id_of_import_from_kind ifk_a in
+      let x = H.id_of_import_from_kind ifk_b in
       let name = H.name_of_ids (xs @ [ x ]) in
+      let alias_a = H.alias_opt_of_import_from_kind ifk_a in
+      let alias_b = H.alias_opt_of_import_from_kind ifk_b in
       let* () = m_tok a0 b0 in
       let* () = envf (str, tok) (MV.N name) in
-      (m_option_none_can_match_some m_ident_and_id_info) a3 b3
+      (m_option_none_can_match_some m_ident_and_id_info) alias_a alias_b
   | G.ImportFrom (a0, a1, a2), B.ImportFrom (b0, b1, b2) ->
       m_tok a0 b0 >>= fun () ->
       m_module_name_prefix a1 b1 >>= fun () ->
-      let f (x1, x2) (y1, y2) =
-        m_ident_and_empty_id_info x1 y1 >>= fun () ->
-        (m_option_none_can_match_some m_ident_and_id_info) x2 y2
-      in
-      m_list_in_any_order ~less_is_ok:true f a2 b2
+      m_list_in_any_order ~less_is_ok:true m_import_from_kind a2 b2
   | G.ImportAs (a0, a1, a2), B.ImportAs (b0, b1, b2) ->
       m_tok a0 b0 >>= fun () ->
       m_module_name_prefix a1 b1 >>= fun () ->

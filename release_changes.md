@@ -1,15 +1,45 @@
-## [1.95.0](https://github.com/returntocorp/semgrep/releases/tag/v1.95.0) - 2024-10-31
+## [1.103.0](https://github.com/semgrep/semgrep/releases/tag/v1.103.0) - 2025-01-15
+
+
+### Added
+
+
+- pro: taint: Support for lambdas as callbacks.
+
+      var tainted = source();
+
+      function withCallback1(val, callback) {
+          if (val) {
+              callback(val);
+          }
+      }
+
+      withCallback1(tainted, function (val) {
+          sink(val); // finding !
+      }); (code-7626)
+- pro: python: Semgrep will now consider top-level lambdas like `x` below for
+  inter-procedural analysis:
+
+      x = lambda s: sink(s) # now we get a finding !
+
+      x(taint) (gh-10731)
 
 
 ### Changed
 
 
-- Remove deprecated `--enable-experimental-requirements` flag. Functionality has
-  been always enabled since Semgrep 1.93.0. (ssc-1903)
+- Removed `pip` from the Semgrep Docker image. If you need it, you may install it by running `apk add py3-pip`. (saf-1774)
 
 
 ### Fixed
 
 
-- osemgrep: Running `osemgrep` with the Pro Engine now correctly runs rules with proprietary languages (saf-1686)
-- Fixed bug where semgrep would crash if --trace was passed (saf-tracing)
+- Python: Now correctly parsing files with parenthesized `with`s, like this:
+  ```
+  with (
+    f() as a,
+    g() as b,
+  ):
+    pass
+  ``` (saf-1802)
+- Semgrep will now truncate error messages that are produced when they are very long (saf-333)

@@ -67,12 +67,14 @@ let rec translate_metavar_cond cond : [> `O of (string * Yaml.value) list ] =
         @
         match lang with
         | None -> []
-        | Some x -> [ ("language", `String (Xlang.to_string x)) ])
+        | Some x -> [ ("language", `String (Analyzer.to_string x)) ])
   | CondName { mvar; kind; modules } ->
       `O
         ([ ("metavariable", `String mvar) ]
         @ (match kind with
           | Some DjangoView -> [ ("kind", `String "django-view") ]
+          | Some ExpressApp -> [ ("kind", `String "express-app") ]
+          | Some ExpressController -> [ ("kind", `String "express-controller") ]
           | None -> [])
         @
         match modules with
@@ -101,7 +103,7 @@ let rec translate_metavar_cond cond : [> `O of (string * Yaml.value) list ] =
         @
         match lang with
         | None -> []
-        | Some x -> [ ("language", `String (Xlang.to_string x)) ])
+        | Some x -> [ ("language", `String (Analyzer.to_string x)) ])
 
 and translate_taint_source
     {

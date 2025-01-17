@@ -1,3 +1,4 @@
+import hashlib
 from abc import ABC
 from abc import abstractmethod
 from collections import defaultdict
@@ -21,27 +22,20 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 
 
-class PackageManagerType(Enum):
-    PIP = auto()
-    POETRY = auto()
-    PIPENV = auto()
-    NPM = auto()
-    YARN = auto()
-    PNPM = auto()
-    RUBY_GEM = auto()
-    GO_MOD = auto()
-    CARGO = auto()
-    MAVEN = auto()
-    GRADLE = auto()
-    COMPOSER = auto()
-    NUGET = auto()
-    DART_PUB = auto()
-    SWIFT_PM = auto()
-    ELIXIR_HEX = auto()
-
-
 class ResolutionMethod(Enum):
+    # we parsed a lockfile that was already included in the repository
     LOCKFILE_PARSING = auto()
+
+    # we communicated with the package manager to resolve dependencies
+    DYNAMIC = auto()
+
+    def to_stats_output(self) -> out.ResolutionMethod:
+        if self == ResolutionMethod.LOCKFILE_PARSING:
+            return out.ResolutionMethod(value=out.LockfileParsing())
+        elif self == ResolutionMethod.DYNAMIC:
+            return out.ResolutionMethod(value=out.DynamicResolution())
+        else:
+            raise ValueError(f"Unsupported resolution method: {self}")
 
 
 class DependencySource(ABC):
@@ -49,40 +43,97 @@ class DependencySource(ABC):
     def get_display_paths(self) -> List[Path]:
         return []
 
+    @abstractmethod
+    def to_stats_output(self) -> List[out.DependencySourceFile]:
+        pass
+
 
 @dataclass(frozen=True)
 class ManifestOnlyDependencySource(DependencySource):
-    manifest_path: Path
-    # we don't include package manager type for the manifest-only source,
-    # because it's possible that we don't know (e.g. package.json, pyproject.toml
-    # are both used for multiple package managers.)
-    manifest_kind: out.ManifestKind
+    manifest: out.Manifest
 
     def get_display_paths(self) -> List[Path]:
-        return [self.manifest_path]
+        return [Path(self.manifest.path.value)]
+
+    def to_semgrep_output(self) -> out.DependencySource:
+        return out.DependencySource(out.ManifestOnlyDependencySource(self.manifest))
+
+    def to_stats_output(self) -> List[out.DependencySourceFile]:
+        return [
+            out.DependencySourceFile(
+                kind=out.DependencySourceFileKind(
+                    value=out.Manifest_(value=self.manifest.kind)
+                ),
+                path=self.manifest.path,
+            )
+        ]
 
 
 @dataclass(frozen=True)
-class PackageManagerDependencySource(DependencySource):
-    package_manager_type: PackageManagerType
+class LockfileOnlyDependencySource(DependencySource):
+    lockfile: out.Lockfile
+
+    def get_display_paths(self) -> List[Path]:
+        return [Path(self.lockfile.path.value)]
+
+    def to_semgrep_output(self) -> out.DependencySource:
+        return out.DependencySource(out.LockfileOnlyDependencySource(self.lockfile))
+
+    def to_stats_output(self) -> List[out.DependencySourceFile]:
+        return [
+            out.DependencySourceFile(
+                kind=out.DependencySourceFileKind(
+                    value=out.Lockfile_(value=self.lockfile.kind)
+                ),
+                path=self.lockfile.path,
+            )
+        ]
 
 
 @dataclass(frozen=True)
-class LockfileDependencySource(PackageManagerDependencySource):
-    manifest: Optional[out.Manifest]
-    lockfile_path: Path
+class ManifestLockfileDependencySource(DependencySource):
+    manifest: out.Manifest
+    lockfile: out.Lockfile
 
     def get_display_paths(self) -> List[Path]:
-        return [self.lockfile_path]
+        return [Path(self.lockfile.path.value)]
+
+    def to_semgrep_output(self) -> out.DependencySource:
+        return out.DependencySource(
+            out.ManifestLockfileDependencySource((self.manifest, self.lockfile))
+        )
+
+    def to_stats_output(self) -> List[out.DependencySourceFile]:
+        lockfile_entry = out.DependencySourceFile(
+            kind=out.DependencySourceFileKind(
+                value=out.Lockfile_(value=self.lockfile.kind)
+            ),
+            path=self.lockfile.path,
+        )
+
+        manifest_entry = out.DependencySourceFile(
+            kind=out.DependencySourceFileKind(
+                value=out.Manifest_(value=self.manifest.kind)
+            ),
+            path=self.manifest.path,
+        )
+
+        return [lockfile_entry, manifest_entry]
 
 
 @dataclass(frozen=True)
 class MultiLockfileDependencySource(DependencySource):
     # note: we use a tuple instead of a list here to allow hashing the whole type
-    sources: Tuple[LockfileDependencySource, ...]
+    sources: Tuple[
+        Union[LockfileOnlyDependencySource, ManifestLockfileDependencySource], ...
+    ]
 
     def get_display_paths(self) -> List[Path]:
-        return [source.lockfile_path for source in self.sources]
+        # aggregate all display paths for each of the child sources
+        return [path for source in self.sources for path in source.get_display_paths()]
+
+    def to_stats_output(self) -> List[out.DependencySourceFile]:
+        return [item for source in self.sources for item in source.to_stats_output()]
 
 
 @dataclass(frozen=True)
@@ -98,7 +149,7 @@ class ResolvedDependencies:
     def from_resolved_interfaces(
         cls, resolved: out.ResolutionOk
     ) -> "ResolvedDependencies":
-        return cls.from_found_dependencies(resolved.value)
+        return cls.from_found_dependencies(resolved.value[0])
 
     @classmethod
     def from_found_dependencies(
@@ -205,6 +256,12 @@ class ResolvedDependencies:
         for dependency in unknown:
             print(f"- {dependency.package}@{dependency.version}")
 
+    def count(self) -> int:
+        """
+        Count the number of dependencies
+        """
+        return sum(1 for _ in self.iter_found_dependencies())
+
 
 @dataclass(frozen=True)
 class Subproject:
@@ -221,6 +278,21 @@ class Subproject:
     # the dependency source is how we resolved the dependencies. This might be a lockfile/manifest pair (the only current one),
     # but in the future it might also be dynamic resolution based on a manifest, an SBOM, or something else
     dependency_source: DependencySource
+
+    def to_stats_output(self) -> out.SubprojectStats:
+        # subproject id is a hash based on the dependency field paths
+        normalized_paths = sorted(
+            str(path).strip() for path in self.dependency_source.get_display_paths()
+        )
+        subproject_id = hashlib.sha256(
+            "".join(normalized_paths).encode("utf-8")
+        ).hexdigest()
+
+        return out.SubprojectStats(
+            subproject_id=subproject_id,
+            dependency_sources=self.dependency_source.to_stats_output(),
+            resolved_stats=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -283,6 +355,19 @@ class ResolvedSubproject(Subproject):
                 found_dependencies
             ),
             resolution_method=resolution_method,
+        )
+
+    def to_stats_output(self) -> out.SubprojectStats:
+        base_stats = super().to_stats_output()
+
+        return out.SubprojectStats(
+            subproject_id=base_stats.subproject_id,
+            dependency_sources=base_stats.dependency_sources,
+            resolved_stats=out.DependencyResolutionStats(
+                ecosystem=self.ecosystem,
+                resolution_method=self.resolution_method.to_stats_output(),
+                dependency_count=self.found_dependencies.count(),
+            ),
         )
 
 

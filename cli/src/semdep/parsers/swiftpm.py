@@ -5,6 +5,7 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import any_char
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
@@ -29,7 +30,7 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Jsondoc
 from semgrep.semgrep_interfaces.semgrep_output_v1 import PackageResolved
-from semgrep.semgrep_interfaces.semgrep_output_v1 import PackageSwift
+from semgrep.semgrep_interfaces.semgrep_output_v1 import PackageSwift_
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import SwiftPM
 from semgrep.verbose_logging import getLogger
@@ -109,10 +110,24 @@ package_swift_parser = (
     any_char.until(regex(r"dependencies\s*:")) >> dependencies_block << any_char.many()
 )
 
+# versions of Package.resolved are defined in swift source code at
+# https://github.com/swiftlang/swift-package-manager/blob/4c206fb9edf118b213485f295295e41eed995bb1/Sources/PackageGraph/ResolvedPackagesStore.swift#L319
 
-def parse_swiftpm_v2(
-    lockfile_path: Path, lockfile: Dict[str, JSON], direct_deps: Set[str]
+
+def parse_swiftpm_v2_v3(
+    lockfile_path: Path,
+    lockfile: Dict[str, JSON],
+    direct_deps: Set[str],
+    manifest_path: Optional[Path],
 ) -> List[FoundDependency]:
+    """
+    Parse a SwiftPM Package.resolved file of version 2 or version 3. The only difference between v2
+    and v3 is a single 'originHash' field that is used as a performance optimization in SwiftPM and that
+    we do not care about, so the same parser is used for v2 and v3.
+
+    See https://github.com/swiftlang/swift-package-manager/blob/4c206fb9edf118b213485f295295e41eed995bb1/Sources/PackageGraph/ResolvedPackagesStore.swift#L421-L519
+    for the source code defining V2 and V3 to see the difference. The PR that introduced V3 can be found at https://github.com/swiftlang/swift-package-manager/pull/6698
+    """
     result = []
 
     deps = lockfile.get("pins")
@@ -151,6 +166,7 @@ def parse_swiftpm_v2(
                 git_ref=revision.as_str() if revision else None,
                 resolved_url=repository_url.as_str() if repository_url else None,
                 lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
 
@@ -158,7 +174,10 @@ def parse_swiftpm_v2(
 
 
 def parse_swiftpm_v1(
-    lockfile_path: Path, lockfile: Dict[str, JSON], direct_deps: Set[str]
+    lockfile_path: Path,
+    lockfile: Dict[str, JSON],
+    direct_deps: Set[str],
+    manifest_path: Optional[Path],
 ) -> List[FoundDependency]:
     result = []
 
@@ -199,6 +218,7 @@ def parse_swiftpm_v1(
                 git_ref=revision.as_str() if revision else None,
                 resolved_url=repository_url.as_str() if repository_url else None,
                 lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
 
@@ -219,7 +239,7 @@ def parse_package_resolved(
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
         DependencyFileToParse(lockfile_path, json_doc, ScaParserName(Jsondoc())),
         DependencyFileToParse(
-            manifest_path, package_swift_parser, ScaParserName(PackageSwift())
+            manifest_path, package_swift_parser, ScaParserName(PackageSwift_())
         )
         if manifest_path
         else None,
@@ -235,7 +255,7 @@ def parse_package_resolved(
         logger.info("no version in lockfile %s", lockfile_path)
         errors.append(
             DependencyParserError(
-                str(lockfile_path),
+                out.Fpath(str(lockfile_path)),
                 ScaParserName(PackageResolved()),
                 "Unable to determine version of swift lockfile",
             )
@@ -248,15 +268,19 @@ def parse_package_resolved(
 
     all_deps = []
     if lockfile_version_int == 1:
-        all_deps = parse_swiftpm_v1(lockfile_path, lockfile_json, direct_deps)
-    elif lockfile_version_int == 2:
-        all_deps = parse_swiftpm_v2(lockfile_path, lockfile_json, direct_deps)
+        all_deps = parse_swiftpm_v1(
+            lockfile_path, lockfile_json, direct_deps, manifest_path
+        )
+    elif lockfile_version_int == 2 or lockfile_version_int == 3:
+        all_deps = parse_swiftpm_v2_v3(
+            lockfile_path, lockfile_json, direct_deps, manifest_path
+        )
     else:
         errors.append(
             DependencyParserError(
-                str(lockfile_path),
+                out.Fpath(str(lockfile_path)),
                 ScaParserName(PackageResolved()),
-                "Invalid lockfile version. Expected 1 or 2.",
+                "Invalid lockfile version. Expected 1, 2, or 3.",
             )
         )
 

@@ -52,7 +52,7 @@ type diff_scan_func =
 let remove_matches_in_baseline caps (commit : string) (baseline : Core_result.t)
     (head : Core_result.t)
     (renamed : (string (* filename *) * string (* filename *)) list) =
-  let extract_sig renamed (m : Pattern_match.t) =
+  let extract_sig renamed (m : Core_match.t) =
     let rule_id = m.rule_id in
     let path =
       !!(m.path.internal_path_to_content) |> fun p ->
@@ -62,11 +62,21 @@ let remove_matches_in_baseline caps (commit : string) (baseline : Core_result.t)
       |> Option.value ~default:p
     in
     let start_range, end_range = m.range_loc in
-    let syntactic_ctx =
-      UFile.lines_of_file
-        (start_range.pos.line, end_range.pos.line)
-        m.path.internal_path_to_content
+    let path' = m.path.internal_path_to_content in
+    let syntactic_ctx : string list =
+      match
+        UFile.lines_of_file (start_range.pos.line, end_range.pos.line) path'
+      with
+      | Ok xs -> xs
+      | Error err ->
+          Logs.warn (fun m ->
+              m
+                "error on accessing lines of %s; skipping syntactic_ctx (error \
+                 was %s)"
+                !!path' err);
+          []
     in
+
     (rule_id, path, syntactic_ctx)
   in
   let sigs = Hashtbl.create 10 in
@@ -92,8 +102,8 @@ let remove_matches_in_baseline caps (commit : string) (baseline : Core_result.t)
           beginning of the file. *)
       |> List.sort
            (fun ({ pm = x; _ } : Core_result.processed_match) { pm = y; _ } ->
-             let x_start_range, x_end_range = x.Pattern_match.range_loc in
-             let y_start_range, y_end_range = y.Pattern_match.range_loc in
+             let x_start_range, x_end_range = x.range_loc in
+             let y_start_range, y_end_range = y.range_loc in
              let start_compare =
                x_start_range.pos.bytepos - y_start_range.pos.bytepos
              in
@@ -129,7 +139,7 @@ let scan_baseline_and_remove_duplicates (caps : < Cap.chdir ; Cap.tmp >)
     let rules_in_match =
       r.processed_matches
       |> List_.map (fun ({ pm; _ } : Core_result.processed_match) ->
-             pm.Pattern_match.rule_id.id |> Rule_ID.to_string)
+             pm.rule_id.id |> Rule_ID.to_string)
       |> SS.of_list
     in
     (* only use the rules that have been identified within the existing
@@ -170,7 +180,7 @@ let scan_baseline_and_remove_duplicates (caps : < Cap.chdir ; Cap.tmp >)
               let baseline_targets, baseline_diff_targets =
                 match conf.engine_type with
                 | PRO Engine_type.{ analysis = Interprocedural; _ } ->
-                    let all_in_baseline, _ =
+                    let all_in_baseline, _errors, _skipped =
                       Find_targets.get_target_fpaths conf.targeting_conf
                         conf.target_roots
                     in

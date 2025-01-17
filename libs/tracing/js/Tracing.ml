@@ -37,6 +37,14 @@ type config = {
 [@@deriving show]
 
 (*****************************************************************************)
+(* Constants *)
+(*****************************************************************************)
+module Attributes = struct
+  let version = "version"
+  let instance_id = "instance_id"
+  let deployment_environment_name = "deployment.environment.name"
+end
+(*****************************************************************************)
 (* Levels *)
 (*****************************************************************************)
 
@@ -84,19 +92,19 @@ let trace_data_only ?(level = Info) ~__FUNCTION__ ~__FILE__ ~__LINE__ _name
   ignore level;
   ()
 
+let no_telemetry_tag = Logs_.create_tag "no_telemetry"
+let no_telemetry_tag_set = Logs_.create_tag_set [ no_telemetry_tag ]
 let otel_reporter : Logs.reporter = Logs.nop_reporter
 (*****************************************************************************)
 (* Entry points for setting up tracing *)
 (*****************************************************************************)
 
-let stop_tracing () = ()
+let stop_tracing ~exit_active_spans:_ () = ()
 let restart_tracing () = ()
 
-let configure_tracing ?(attrs = []) ?(env = "") ?(version = "")
-    (_service_name : string) (_endpoint : Uri.t) =
+let configure_tracing ?(attrs = []) (_service_name : string) (_endpoint : Uri.t)
+    =
   ignore attrs;
-  ignore env;
-  ignore version;
   ()
 
 let with_tracing (_fname : string)

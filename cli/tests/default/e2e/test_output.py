@@ -1,6 +1,7 @@
 import collections
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict
@@ -123,6 +124,8 @@ def test_yaml_metavariables(run_semgrep_in_tmp: RunSemgrep, snapshot):
         "rules/yaml_key.yaml",
         target_name="yaml/target.yaml",
         output_format=OutputFormat.JSON,
+        # we now need to be logged in to access metavariables
+        is_logged_in_weak=True,
     )
     parsed_output = json.loads(stdout)
     assert "results" in parsed_output
@@ -358,16 +361,25 @@ IGNORE_LOG_REPORT_LAST_LINE = (
 )
 
 
+# TODO: remove this test: too many things being tested at once, too hard
+#       to debug.
+#
+# pysemgrep/osemgrep status: osemgrep reports 2 more files that are being
+# excluded. They're excluded in both implementations.
 @pytest.mark.kinda_slow
-@pytest.mark.osemfail
+@pytest.mark.pysemfail
 def test_semgrepignore_ignore_log_report(
-    run_semgrep_in_tmp: RunSemgrep, tmp_path, snapshot
+    run_semgrep_on_copied_files: RunSemgrep, tmp_path, snapshot
 ):
-    (tmp_path / ".semgrepignore").symlink_to(
-        Path(TARGETS_PATH / "ignores" / ".semgrepignore").resolve()
+    shutil.copyfile(
+        Path(TARGETS_PATH / "ignores" / ".semgrepignore"), tmp_path / ".semgrepignore"
+    )
+    # See remarks in test_ignores.py:
+    shutil.copyfile(
+        Path(TARGETS_PATH / "ignores" / ".gitignore"), tmp_path / ".gitignore"
     )
 
-    _, stderr = run_semgrep_in_tmp(
+    _, stderr = run_semgrep_on_copied_files(
         "rules/eqeq-basic.yaml",
         # This set of options is carefully crafted
         # to trigger one entry for most ignore reasons.
@@ -397,16 +409,36 @@ def test_semgrepignore_ignore_log_report(
     snapshot.assert_match(report.group(), "report.txt")
 
 
+# Tolerate a different snapshot with pysemgrep than osemgrep.
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_semgrepignore_ignore_log_json_report(
-    run_semgrep_in_tmp: RunSemgrep, tmp_path, snapshot
+def test_semgrepignore_ignore_log_report_pysemgrep(
+    run_semgrep_on_copied_files: RunSemgrep, tmp_path, snapshot
 ):
-    (tmp_path / ".semgrepignore").symlink_to(
-        Path(TARGETS_PATH / "ignores" / ".semgrepignore").resolve()
+    test_semgrepignore_ignore_log_report(
+        run_semgrep_on_copied_files, tmp_path, snapshot
     )
 
-    stdout, _ = run_semgrep_in_tmp(
+
+# TODO: remove this test: too many things being tested at once, too hard
+#       to review when something changes.
+#
+# pysemgrep/osemgrep status: osemgrep reports 2 more files that are being
+# excluded. They're excluded in both implementations.
+@pytest.mark.kinda_slow
+@pytest.mark.pysemfail
+def test_semgrepignore_ignore_log_json_report(
+    run_semgrep_on_copied_files: RunSemgrep, tmp_path, snapshot
+):
+    shutil.copyfile(
+        Path(TARGETS_PATH / "ignores" / ".semgrepignore"), tmp_path / ".semgrepignore"
+    )
+    # See remarks in test_ignores.py:
+    shutil.copyfile(
+        Path(TARGETS_PATH / "ignores" / ".gitignore"), tmp_path / ".gitignore"
+    )
+
+    stdout, _ = run_semgrep_on_copied_files(
         "rules/eqeq-basic.yaml",
         # This set of options is carefully crafted
         # to trigger one entry for most ignore reasons.
@@ -428,6 +460,17 @@ def test_semgrepignore_ignore_log_json_report(
 
     snapshot.assert_match(
         json.dumps(parsed_output["paths"], indent=2, sort_keys=True), "report.json"
+    )
+
+
+# Tolerate a different snapshot with pysemgrep than osemgrep.
+@pytest.mark.kinda_slow
+@pytest.mark.osemfail
+def test_semgrepignore_ignore_log_json_report_pysemgrep(
+    run_semgrep_on_copied_files: RunSemgrep, tmp_path, snapshot
+):
+    test_semgrepignore_ignore_log_json_report(
+        run_semgrep_on_copied_files, tmp_path, snapshot
     )
 
 
@@ -501,3 +544,16 @@ def test_file_count_multifile(run_semgrep_in_tmp: RunSemgrep, snapshot, target_d
         options=[],
     )
     snapshot.assert_match(stderr, "result.out")
+
+
+@pytest.mark.slow
+@pytest.mark.osemfail
+def test_output_truncated_messages(run_semgrep_in_tmp: RunSemgrep, snapshot):
+    stdout, _ = run_semgrep_in_tmp(
+        "rules/eqeq-basic-c.yaml",
+        target_name="bad/invalid_c_long.c",
+        output_format=OutputFormat.JSON,
+        assert_exit_code=3,
+    )
+    snapshot.assert_match(stdout, "report.json")
+    # NOTE if we display these in text mode then we should also test that

@@ -68,6 +68,11 @@ let error_message ~rule_id ~(location : Out.location option)
         | None -> ""
         | Some loc -> spf "at line %s:%d" !!(loc.path) loc.start.line)
   in
+  (* TODO: this error message can be ugly. It shouldn't contain special
+     formatting such as significant newlines and indentation. It should
+     also not print the JSON constructor because most of them are not
+     English text. Revise this once all the CLI text output is migrated
+     to OCaml. *)
   spf "%s %s:\n %s"
     (Error.string_of_error_type error_type)
     error_context core_message
@@ -273,6 +278,7 @@ let cli_match_of_core_match ~fixed_lines fixed_env (hrules : Rule.hrules)
        fix;
        is_ignored;
        dataflow_trace;
+       sca_match;
      };
   } ->
       let rule =
@@ -309,9 +315,20 @@ let cli_match_of_core_match ~fixed_lines fixed_env (hrules : Rule.hrules)
        * entirety of every line involved in the match, not just the text that
        * matched. *)
       let lines =
-        Semgrep_output_utils.lines_of_file_at_range (start, end_) path
+        match
+          Semgrep_output_utils.lines_of_file_at_range (start, end_) path
+        with
+        | Ok xs -> xs |> String.concat "\n"
+        | Error err ->
+            Logs.warn (fun m ->
+                m
+                  "error on accessing lines of %s; match was with rule %s; \
+                   skipping lines field for this match (error was %s)"
+                  !!path
+                  (Rule_ID.to_string rule_id)
+                  err);
+            ""
       in
-      let lines = lines |> String.concat "\n" in
       {
         check_id;
         path;
@@ -327,15 +344,13 @@ let cli_match_of_core_match ~fixed_lines fixed_env (hrules : Rule.hrules)
             metadata;
             fix;
             is_ignored = Some is_ignored;
-            (* TODO: extra fields *)
             fingerprint =
               Semgrep_hashing_functions.match_based_id_partial rule rule_id
                 metavars !!path;
-            sca_info = None;
+            sca_info = sca_match;
             fixed_lines;
             dataflow_trace;
-            (* It's optional in the CLI output, but not in the core match results!
-             *)
+            (* It's optional in the CLI output, but not in core match results!*)
             engine_kind = Some engine_kind;
             validation_state;
             historical_info;
@@ -393,13 +408,96 @@ let index_match_based_ids (matches : Out.cli_match list) : Out.cli_match list =
   |> List_.map snd
 
 (*****************************************************************************)
-(* Entry point *)
+(* Gated logged-in fields *)
 (*****************************************************************************)
 
-(* The 3 regular parameters are mostly Core_runner.result but we don't want
- * to depend on cli_scan/ from reporting/ here, hence the duplication.
- * alt: we could move Core_runner.result type in src/osemgrep/core/
+(* coupling: if you modify which fields are gated by ctx.is_logged_in update also
+ * https://semgrep.dev/docs/semgrep-appsec-platform/json-and-sarif#json
+ * alt: move in Gated_data.ml
  *)
+let adjust_fields_cli_outpout_logged_out (x : Out.cli_output) : Out.cli_output =
+  (* note: I could use { x with ... } but better to explicitely list the fields
+   * here so we see explicitely what we filter and what we do not.
+   *)
+  let {
+    version;
+    results;
+    errors;
+    paths;
+    skipped_rules;
+    explanations;
+    interfile_languages_used = _;
+    time;
+    rules_by_engine;
+    engine_requested;
+  } : Out.cli_output =
+    x
+  in
+  let interfile_languages_used = None in
+  let results =
+    results
+    |> List_.map (fun res ->
+           let { check_id; extra; path; start; end_ } : Out.cli_match = res in
+           let {
+             metavars = _;
+             message;
+             fix;
+             fixed_lines;
+             metadata;
+             severity;
+             fingerprint = _;
+             lines = _;
+             is_ignored = _;
+             sca_info;
+             dataflow_trace = _;
+             engine_kind;
+             validation_state;
+             historical_info;
+             extra_extra;
+           } : Out.cli_match_extra =
+             extra
+           in
+           let extra =
+             Out.
+               {
+                 metavars = None;
+                 message;
+                 fix;
+                 fixed_lines;
+                 (* TODO? metadata filtering? *)
+                 metadata;
+                 severity;
+                 fingerprint = Gated_data.msg;
+                 lines = Gated_data.msg;
+                 is_ignored = None;
+                 sca_info;
+                 dataflow_trace = None;
+                 engine_kind;
+                 validation_state;
+                 historical_info;
+                 extra_extra;
+               }
+           in
+           Out.{ check_id; extra; path; start; end_ })
+  in
+  {
+    version;
+    results;
+    errors;
+    paths;
+    skipped_rules;
+    explanations;
+    interfile_languages_used;
+    time;
+    rules_by_engine;
+    engine_requested;
+  }
+
+(*****************************************************************************)
+(* Cli_output builder *)
+(*****************************************************************************)
+
+(* The core/hrules/scanned params are essentially Core_runner.result *)
 let cli_output_of_runner_result ~fixed_lines (core : Out.core_output)
     (hrules : Rule.hrules) (scanned : Fpath.t Set_.t) : Out.cli_output =
   match core with
@@ -475,3 +573,14 @@ let cli_output_of_runner_result ~fixed_lines (core : Out.core_output)
         rules_by_engine = None;
         engine_requested = None;
       }
+
+(*****************************************************************************)
+(* Entry point *)
+(*****************************************************************************)
+
+let json_output (ctx : Out.format_context) (cli_output : Out.cli_output) =
+  let cli_output =
+    if ctx.is_logged_in then cli_output
+    else adjust_fields_cli_outpout_logged_out cli_output
+  in
+  Out.string_of_cli_output cli_output

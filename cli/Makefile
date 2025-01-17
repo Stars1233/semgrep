@@ -187,7 +187,11 @@ osemgrep-qa:
 .PHONY:
 regenerate-tests:
 	pipenv run pytest -n auto \
-	  --run-only-snapshots --snapshot-update --allow-snapshot-deletion
+	  --run-only-snapshots --snapshot-update --allow-snapshot-deletion \
+	  -m 'not pysemfail' tests/default/e2e tests/default/e2e-other
+	PYTEST_USE_OSEMGREP=true pipenv run pytest -n auto \
+	  --run-only-snapshots --snapshot-update --allow-snapshot-deletion \
+	  -m 'pysemfail' tests/default/e2e tests/default/e2e-other
 
 .PHONY: setup
 setup:

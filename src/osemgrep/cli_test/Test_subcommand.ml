@@ -229,7 +229,7 @@ let unix_diff (str1 : string) (str2 : string) : string list =
           Common2.unix_diff !!file1 !!file2))
 
 let fixtest_result_for_target (_env : env) (target : Fpath.t)
-    (fixtest_target : Fpath.t) (pms : Pattern_match.t list) : fixtest_result =
+    (fixtest_target : Fpath.t) (pms : Core_match.t list) : fixtest_result =
   Logs.info (fun m -> m "Using %s for fixtest" !!fixtest_target);
   let (textedits : Textedit.t list) =
     pms |> List.concat_map (fun pm -> Autofix.render_fix pm |> Option.to_list)
@@ -447,14 +447,14 @@ let core_scan_config (conf : Test_CLI.conf) (rules : Rule.t list)
 let run_rules_against_targets_for_engine caps (env : env) (rules : Rule.t list)
     (targets : Target.t list) : Core_result.t =
   (* old:
-   * let xtarget = Test_engine.xtarget_of_file xlang target in
+   * let xtarget = Test_engine.xtarget_of_file analyzer target in
    * let xconf = { Match_env.default_xconfig with matching_explanations = true}in
    * Match_rules.check ~match_hook:(fun _ ->()) ~timeout:None xconf rules xtarget
    *)
   let config = core_scan_config env.conf rules targets in
   let res_or_exn : Core_result.result_or_exn =
     match env.engine with
-    | A.OSS -> Core_scan.scan (caps :> Core_scan.caps) config
+    | A.OSS -> Core_scan.scan caps config
     | A.Pro -> !hook_pro_scan (caps :> Core_scan.caps) config
     | A.Deep ->
         (* LATER: support also interfile tests where many targets are in
@@ -525,7 +525,7 @@ let diff_findings (actual : int list) (expected : int list) : string =
  * it does not handle the actual rule id in the annotations and is
  * not compatible with what 'pysemgrep test' was doing when comparing.
  *)
-let compare_actual_to_expected (env : env) (matches : Pattern_match.t list)
+let compare_actual_to_expected (env : env) (matches : Core_match.t list)
     (annots : (Fpath.t * A.annotations) list)
     (explanations : Matching_explanation.t list option) : test_result list =
   let xtra =
@@ -536,16 +536,16 @@ let compare_actual_to_expected (env : env) (matches : Pattern_match.t list)
   in
   (* actual matches *)
   let matches_by_ruleid_and_file :
-      (Rule_ID.t, (Fpath.t, Pattern_match.t list) Assoc.t) Assoc.t =
+      (Rule_ID.t, (Fpath.t, Core_match.t list) Assoc.t) Assoc.t =
     if List_.null matches then
       (* stricter: *)
       Logs.warn (fun m -> m "nothing matched for %s%s" !!(env.rule_file) xtra);
     matches
-    |> Assoc.group_by (fun (pm : Pattern_match.t) -> pm.rule_id.id)
+    |> Assoc.group_by (fun (pm : Core_match.t) -> pm.rule_id.id)
     |> List_.map (fun (rule_id, pms) ->
            ( rule_id,
              pms
-             |> Assoc.group_by (fun (pm : Pattern_match.t) ->
+             |> Assoc.group_by (fun (pm : Core_match.t) ->
                     (* We need Fpath.normalize because for unclear reasons DeepScan
                      * returns matches with paths that may differ from
                      * the one below in the annotations so simpler to normalize
@@ -580,7 +580,7 @@ let compare_actual_to_expected (env : env) (matches : Pattern_match.t list)
   let checks : (Rule_ID.t * Out.rule_result) list =
     all_rule_ids
     |> List_.map (fun (id : Rule_ID.t) ->
-           let actual : (Fpath.t, Pattern_match.t list) Assoc.t =
+           let actual : (Fpath.t, Core_match.t list) Assoc.t =
              matches_by_ruleid_and_file |> Assoc.find_opt id
              |> List_.optlist_to_list
            in
@@ -592,12 +592,12 @@ let compare_actual_to_expected (env : env) (matches : Pattern_match.t list)
            let res : (bool * (Fpath.t * Out.expected_reported)) list =
              all_files
              |> List_.map (fun (target : Fpath.t) ->
-                    let matches : Pattern_match.t list =
+                    let matches : Core_match.t list =
                       actual |> Assoc.find_opt target |> List_.optlist_to_list
                     in
                     let (reported_lines : A.linenb list) =
                       matches
-                      |> List_.map (fun (pm : Pattern_match.t) ->
+                      |> List_.map (fun (pm : Core_match.t) ->
                              pm.range_loc |> fst |> fun (loc : Loc.t) ->
                              loc.pos.line)
                       |> List.sort_uniq Int.compare
@@ -666,7 +666,7 @@ let compare_actual_to_expected (env : env) (matches : Pattern_match.t list)
   checks
 
 let compare_for_autofix (env : env) (rules : Rule.t list)
-    (matches : Pattern_match.t list) : fixtest_result list =
+    (matches : Core_match.t list) : fixtest_result list =
   env.target_files
   |> List_.filter_map (fun target ->
          match
@@ -692,7 +692,7 @@ let compare_for_autofix (env : env) (rules : Rule.t list)
          | Some fixtest_target, true ->
              let matches =
                matches
-               |> List.filter (fun (pm : Pattern_match.t) ->
+               |> List.filter (fun (pm : Core_match.t) ->
                       Fpath.equal pm.path.internal_path_to_content target)
              in
              Some (fixtest_result_for_target env target fixtest_target matches))
@@ -702,7 +702,7 @@ let compare_for_autofix (env : env) (rules : Rule.t list)
 (*****************************************************************************)
 
 (* alt: call it run_env? *)
-let run_engine (caps : scan_caps) (env : env) (rules : Rule.t list)
+let run_engine (caps : < scan_caps ; .. >) (env : env) (rules : Rule.t list)
     (targets : Target.t list)
     (files_and_annots : (Fpath.t * A.annotations) list) :
     test_result list * fixtest_result list =
@@ -739,11 +739,11 @@ let run_engine (caps : scan_caps) (env : env) (rules : Rule.t list)
   (checks, fixtest)
 
 (* run one test using the different engines if --pro *)
-let run_test (caps : scan_caps) (conf : Test_CLI.conf) (rule_file : Fpath.t)
-    (rules : Rule.t list) (target_files : Fpath.t list)
+let run_test (caps : < scan_caps ; .. >) (conf : Test_CLI.conf)
+    (rule_file : Fpath.t) (rules : Rule.t list) (target_files : Fpath.t list)
     (errors : error list ref) : test_result list * fixtest_result list =
   (* note that even one target file can result in different targets
-   * if the rules contain multiple xlangs.
+   * if the rules contain multiple analyzers.
    *)
   let targets : Target.t list =
     Core_runner.targets_for_files_and_rules target_files rules
@@ -799,7 +799,7 @@ let run_test (caps : scan_caps) (conf : Test_CLI.conf) (rule_file : Fpath.t)
     (checks_oss @ checks_pro @ checks_deep, fixtest_oss)
   else (checks_oss, fixtest_oss)
 
-let run_tests (caps : scan_caps) (conf : Test_CLI.conf) (tests : tests)
+let run_tests (caps : < scan_caps ; .. >) (conf : Test_CLI.conf) (tests : tests)
     (errors : error list ref) :
     (Fpath.t (* rule file *) * test_result list * fixtest_result list) list =
   (* LATER: in theory we could use Parmap here *)
@@ -841,7 +841,7 @@ let run_tests (caps : scan_caps) (conf : Test_CLI.conf) (tests : tests)
 (*****************************************************************************)
 (* Run the conf *)
 (*****************************************************************************)
-let run_conf (caps : caps) (conf : Test_CLI.conf) : Exit_code.t =
+let run_conf (caps : < caps ; .. >) (conf : Test_CLI.conf) : Exit_code.t =
   CLI_common.setup_logging ~force_color:true ~level:conf.common.logging_level;
   (* Metrics_.configure Metrics_.On; ?? and allow to disable it?
    * semgrep-rules/Makefile is running semgrep --test with metrics=off
@@ -861,7 +861,7 @@ let run_conf (caps : caps) (conf : Test_CLI.conf) : Exit_code.t =
   let tests : tests = rules_and_targets conf.target errors in
 
   (* step2: run the tests *)
-  let result : tests_result = run_tests (caps :> scan_caps) conf tests errors in
+  let result : tests_result = run_tests caps conf tests errors in
 
   (* step3: report the test results *)
   let res : Out.tests_result = tests_result_of_tests_result result !errors in
@@ -897,6 +897,6 @@ let run_conf (caps : caps) (conf : Test_CLI.conf) : Exit_code.t =
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
-let main (caps : caps) (argv : string array) : Exit_code.t =
+let main (caps : < caps ; .. >) (argv : string array) : Exit_code.t =
   let conf = Test_CLI.parse_argv argv in
   run_conf caps conf

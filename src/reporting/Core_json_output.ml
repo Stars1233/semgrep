@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2023 Semgrep Inc.
+ * Copyright (C) 2019-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -15,19 +15,34 @@
 open Common
 open Fpath_.Operators
 open AST_generic
-module E = Core_error
 module J = JSON
+module E = Core_error
 module MV = Metavariable
-module RP = Core_result
-module PM = Pattern_match
-open Pattern_match
 module Out = Semgrep_output_v1_j
 module OutUtils = Semgrep_output_utils
 module Log = Log_reporting.Log
 
 (*****************************************************************************)
+(* Prelude *)
+(*****************************************************************************)
+(* semgrep-core -json output.
+ *
+ * See semgrep_output_v1.atd and its [core_output] for the JSON spec of this
+ * output. This "core" output is then read by pysemgrep in core_runner.py
+ * (or by osemgrep in Core_runner.ml) and transform in a "CLI" output
+ * (see [cli_output] in semgrep_output_v1.atd) which is then finally printed
+ * out to the user (see Cli_json_output.ml and Output.ml).
+ *)
+
+(*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
+let max_truncated_length = 2048
+
+let truncate_for_output =
+  String_.truncate_with_message max_truncated_length
+    (* nosemgrep *)
+    (spf "%s... (truncated %d more characters)")
 
 let range_of_any_opt startp_of_match_range any =
   let empty_range = (startp_of_match_range, startp_of_match_range) in
@@ -258,7 +273,7 @@ let token_to_intermediate_var token : Out.match_intermediate_var option =
 let tokens_to_intermediate_vars tokens =
   List_.filter_map token_to_intermediate_var tokens
 
-let rec taint_call_trace (trace : PM.taint_call_trace) :
+let rec taint_call_trace (trace : Taint_trace.call_trace) :
     Out.match_call_trace option =
   match trace with
   | Toks toks ->
@@ -271,7 +286,7 @@ let rec taint_call_trace (trace : PM.taint_call_trace) :
       Some
         (Out.CliCall ((loc, content_of_loc loc), intermediate_vars, call_trace))
 
-let taint_trace_to_dataflow_trace (traces : PM.taint_trace_item list) :
+let taint_trace_to_dataflow_trace (traces : Taint_trace.item list) :
     Out.match_dataflow_trace =
   (* Here, we ignore all but the first taint trace, for source or sink.
      This is because we added support for multiple sources/sinks in a single
@@ -287,7 +302,7 @@ let taint_trace_to_dataflow_trace (traces : PM.taint_trace_item list) :
   let source_call_trace, tokens, sink_call_trace =
     match traces with
     | [] -> raise Common.Impossible
-    | { Pattern_match.source_trace; tokens; sink_trace } :: _ ->
+    | { Taint_trace.source_trace; tokens; sink_trace } :: _ ->
         (source_trace, tokens, sink_trace)
   in
   Out.
@@ -297,22 +312,135 @@ let taint_trace_to_dataflow_trace (traces : PM.taint_trace_item list) :
       taint_sink = taint_call_trace sink_call_trace;
     }
 
+let path_and_historical (path : Target.path) ~(min_loc : Tok.location)
+    ~(max_loc : Tok.location) : Fpath.t * Out.historical_info option =
+  match path.origin with
+  (* We need to do this, because in Terraform, we may end up with a `file` which
+     does not correspond to the actual location of the tokens. This `file` is
+     erroneous, and should be replaced by the location of the code of the match,
+     if possible. Not if it's fake, though.
+     In other languages, this should hopefully not happen.
+  *)
+  | File path ->
+      if
+        (path <> min_loc.pos.file || path <> max_loc.pos.file)
+        && not (Fpath_.is_fake_file min_loc.pos.file)
+      then (min_loc.pos.file, None)
+      else (path, None)
+  (* TODO(cooper): if we can have a uri or something more general than a
+   * file path here then we can stop doing this hack. *)
+  | GitBlob { sha; paths } -> (
+      match paths with
+      | [] -> (path.internal_path_to_content (* no better path *), None)
+      | (commit, path) :: _ ->
+          let git_commit = Git_wrapper.commit_digest commit in
+          let timestamp, offset = (Git_wrapper.commit_author commit).date in
+          let offset =
+            Option.value offset
+              ~default:{ sign = `Plus; hours = 0; minutes = 0 }
+          in
+          ( path,
+            Some
+              ({
+                 git_commit;
+                 git_blob = Some sha;
+                 git_commit_timestamp =
+                   Datetime_.of_unix_int_time timestamp offset.sign offset.hours
+                     offset.minutes;
+               }
+                : Out.historical_info) ))
+
+let sca_pattern_to_sca_pattern (pat : SCA_pattern.t) : Out.sca_pattern =
+  let SCA_pattern.{ ecosystem; package_name = package; version_constraints } =
+    pat
+  in
+  let semver_range =
+    SCA_pattern.version_constraints_to_string version_constraints
+  in
+  Out.{ ecosystem; package; semver_range }
+
+let sca_dependency_to_found_dependency (dep : SCA_dependency.t) :
+    Out.found_dependency =
+  let SCA_dependency.
+        {
+          package_name;
+          package_version = _;
+          package_version_string;
+          ecosystem;
+          transitivity;
+          url;
+          loc = _;
+          tokens = _;
+        } =
+    dep
+  in
+  Out.
+    {
+      package = package_name;
+      version = package_version_string;
+      ecosystem;
+      (* ?? *)
+      allowed_hashes = [];
+      resolved_url = url |> Option.map Uri.to_string;
+      (* TODO *)
+      transitivity;
+      manifest_path = None;
+      lockfile_path = None;
+      line_number = None;
+      children = None;
+      git_ref = None;
+    }
+
+(* TODO: this is a v0, need to port pysemgrep code *)
+let sca_to_sca (m : SCA_match.t) : Out.sca_match =
+  let SCA_match.{ dep; pat; kind } = m in
+  let reachable =
+    match kind with
+    | CodeAndLockfileMatch -> true
+    | LockfileOnlyMatch -> false
+  in
+  (* TODO: need to look at the rule! we might have LockfileOnlyMatch above
+   * with a reachability rune
+   *)
+  let reachability_rule = reachable in
+  let dependency_match : Out.dependency_match =
+    let dependency_pattern : Out.sca_pattern = sca_pattern_to_sca_pattern pat in
+    let found_dependency : Out.found_dependency =
+      sca_dependency_to_found_dependency dep
+    in
+    let lockfile =
+      let loc, _ = dep.loc in
+      loc.pos.file
+    in
+    Out.{ dependency_pattern; found_dependency; lockfile }
+  in
+  Out.
+    {
+      reachable;
+      reachability_rule;
+      (* coupling: dependency_aware_rule.py:SCA_FINDING_SCHEMA *)
+      sca_finding_schema = 20220913;
+      dependency_match;
+    }
+
+(* "unsafe" because can raise NoTokenLocation which is captured in
+ * the safe match_to_match version further below
+ *)
 let unsafe_match_to_match
-    ({ pm = x; is_ignored; autofix_edit } : Core_result.processed_match) :
+    ({ pm; is_ignored; autofix_edit } : Core_result.processed_match) :
     Out.core_match =
-  let min_loc, max_loc = x.range_loc in
+  let min_loc, max_loc = pm.range_loc in
   let startp, endp = OutUtils.position_range min_loc max_loc in
   let dataflow_trace =
-    Option.map
-      (function
-        | (lazy trace) -> taint_trace_to_dataflow_trace trace)
-      x.taint_trace
+    pm.taint_trace
+    |> Option.map (function (lazy trace) -> taint_trace_to_dataflow_trace trace)
   in
-  let metavars = x.env |> List_.map (metavars startp) in
+
+  let metavars = pm.env |> List_.map (metavars startp) in
   let metadata =
-    let* json = x.rule_id.metadata in
+    let* json = pm.rule_id.metadata in
     let rule_metadata = JSON.to_yojson json in
-    match x.metadata_override with
+    match pm.metadata_override with
     | Some metadata_override ->
         Some (JSON.update rule_metadata (JSON.to_yojson metadata_override))
     | None -> Some rule_metadata
@@ -320,48 +448,13 @@ let unsafe_match_to_match
   (* message where the metavars have been interpolated *)
   (* TODO(secrets): apply masking logic here *)
   let message =
-    Metavar_replacement.interpolate_metavars x.rule_id.message
-      (Metavar_replacement.of_bindings x.env)
+    Metavar_replacement.interpolate_metavars ~fmt:truncate_for_output
+      pm.rule_id.message
+      (Metavar_replacement.of_bindings pm.env)
   in
-  let path, historical_info =
-    match x.path.origin with
-    (* We need to do this, because in Terraform, we may end up with a `file` which
-       does not correspond to the actual location of the tokens. This `file` is
-       erroneous, and should be replaced by the location of the code of the match,
-       if possible. Not if it's fake, though.
-       In other languages, this should hopefully not happen.
-    *)
-    | File path ->
-        if
-          (path <> min_loc.pos.file || path <> max_loc.pos.file)
-          && not (Fpath_.is_fake_file min_loc.pos.file)
-        then (min_loc.pos.file, None)
-        else (path, None)
-    (* TODO(cooper): if we can have a uri or something more general than a
-     * file path here then we can stop doing this hack. *)
-    | GitBlob { sha; paths } -> (
-        match paths with
-        | [] -> (x.path.internal_path_to_content (* no better path *), None)
-        | (commit, path) :: _ ->
-            let git_commit = Git_wrapper.commit_digest commit in
-            let timestamp, offset = (Git_wrapper.commit_author commit).date in
-            let offset =
-              Option.value offset
-                ~default:{ sign = `Plus; hours = 0; minutes = 0 }
-            in
-            ( path,
-              Some
-                ({
-                   git_commit;
-                   git_blob = Some sha;
-                   git_commit_timestamp =
-                     Datetime_.of_unix_int_time timestamp offset.sign
-                       offset.hours offset.minutes;
-                 }
-                  : Out.historical_info) ))
-  in
+  let path, historical_info = path_and_historical pm.path ~min_loc ~max_loc in
   {
-    check_id = x.rule_id.id;
+    check_id = pm.rule_id.id;
     (* inherited location *)
     path;
     start = startp;
@@ -370,16 +463,16 @@ let unsafe_match_to_match
     extra =
       {
         message = Some message;
-        severity = x.severity_override;
+        severity = pm.severity_override;
         metadata;
         metavars;
         dataflow_trace;
         fix =
           Option.map (fun edit -> edit.Textedit.replacement_text) autofix_edit;
         is_ignored;
-        (* TODO *)
-        engine_kind = x.engine_of_match;
-        validation_state = Some x.validation_state;
+        engine_kind = pm.engine_of_match;
+        sca_match = Option.map sca_to_sca pm.sca_match;
+        validation_state = Some pm.validation_state;
         historical_info;
         extra_extra = None;
       };
@@ -424,7 +517,13 @@ let error_to_error (err : Core_error.t) : Out.core_error =
   let rule_id = err.rule_id in
   let error_type = err.typ in
   let severity = E.severity_of_error err.typ in
-  let message = err.msg in
+  (* A lot of times if a file is minified/1 or 2 lines, we'll not be able to
+     parse it, and raise a syntax error, and that error message contains the
+     content of the line it can't parse. this results in essentially including
+     the whole file in the json blob which is not good for security or perf
+     reasons. We've seen upwards of 4mb of text in these messages. So let's
+     truncate it *)
+  let message = truncate_for_output err.msg in
   let details = err.details in
   { error_type; rule_id; severity; location; message; details }
 
@@ -577,7 +676,8 @@ let core_output_of_matches_and_errors (res : Core_result.t) : Out.core_output =
       res.explanations |> Option.map (List_.map explanation_to_explanation);
     rules_by_engine = Some res.rules_by_engine;
     interfile_languages_used =
-      Some (List_.map (fun l -> Xlang.to_string l) res.interfile_languages_used);
+      Some
+        (List_.map (fun l -> Analyzer.to_string l) res.interfile_languages_used);
     engine_requested = Some `OSS;
     version = Version.version;
   }

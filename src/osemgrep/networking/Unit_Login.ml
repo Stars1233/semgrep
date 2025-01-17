@@ -51,12 +51,13 @@ let with_mock_normal_responses =
     | "/api/agent/tokens/requests" ->
         let%lwt () =
           Http_mock_client.check_body body
-            Http_mock_client.(
-              body_of_file ~trim:true "./tests/login/fetch_body.json")
+            (Http_mock_client.body_of_file ~trim:true
+               (Fpath.v "./tests/login/fetch_body.json"))
         in
         Lwt.return
           (Http_mock_client.basic_response ~status:200
-             Http_mock_client.(body_of_file "./tests/login/token_response.json"))
+             (Http_mock_client.body_of_file
+                (Fpath.v "./tests/login/token_response.json")))
     | _ -> failwith ("Unexpected path: " ^ Uri.path uri)
   in
   Http_mock_client.with_testing_client make_fn
@@ -102,7 +103,7 @@ let save_token_tests caps =
     | Ok _deployment_config ->
         Alcotest.(check bool)
           "logged in" true
-          (Semgrep_settings.has_api_token ())
+          (Semgrep_login.is_logged_in_weak ())
     | Error e -> failwith e
   in
   let invalid_token_test () =
@@ -112,7 +113,7 @@ let save_token_tests caps =
     | Error _ ->
         Alcotest.(check bool)
           "not logged in" false
-          (Semgrep_settings.has_api_token ())
+          (Semgrep_login.is_logged_in_weak ())
   in
   let tests =
     [ ("invalid token", invalid_token_test); ("valid token", valid_token_test) ]

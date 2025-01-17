@@ -135,6 +135,23 @@ let add_suffix_to_name suffix name =
           name_middle = new_name_middle;
         }
 
+let alias_of_ident id : AST_generic.alias = (id, empty_id_info ())
+
+let mk_import_from_kind (ident : ident) (as_ : ident option) :
+    AST_generic.import_from_kind =
+  match as_ with
+  | None -> Direct (ident, empty_id_info ())
+  | Some as_ -> Aliased (ident, (as_, empty_id_info ()))
+
+let id_of_import_from_kind = function
+  | Direct (id, _)
+  | Aliased (id, _) ->
+      id
+
+let alias_opt_of_import_from_kind = function
+  | Direct _ -> None
+  | Aliased (_, alias) -> Some alias
+
 let name_of_id ?(case_insensitive = false) id =
   Id (id, empty_id_info ~case_insensitive ())
 
@@ -157,6 +174,13 @@ let name_of_dot_access e =
   in
   let* xs = fetch_ids e.e in
   Some (name_of_ids xs)
+
+let resolved_name_of_dot_access e =
+  match e.e with
+  | G.N (G.Id (_, { id_resolved; _ })) -> !id_resolved
+  | G.N (G.IdQualified { name_info = { id_resolved; _ }; _ }) -> !id_resolved
+  | G.DotAccess (_, _, G.FN (G.Id (_, { id_resolved; _ }))) -> !id_resolved
+  | ___else___ -> None
 
 (* TODO: you should not need to use that. This is mostly because
  * Constructor and PatConstructor currently takes a dotted_ident instead
@@ -348,6 +372,11 @@ let has_keyword_attr kwd attrs =
   |> List.exists (function
        | KeywordAttr (kwd2, _) -> kwd =*= kwd2
        | _ -> false)
+
+let id_of_name = function
+  | G.Id (id, id_info) -> (id, id_info)
+  | G.IdQualified { G.name_last = id, _typeargs; name_info = id_info; _ } ->
+      (id, id_info)
 
 let name_is_global = function
   | Global (* OSS *)

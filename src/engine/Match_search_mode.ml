@@ -16,7 +16,7 @@ open Common
 module R = Rule
 module XP = Xpattern
 module MR = Mini_rule
-module PM = Pattern_match
+module PM = Core_match
 module G = AST_generic
 module MV = Metavariable
 module RP = Core_result
@@ -130,8 +130,8 @@ let partition_xpatterns xs =
          | XP.Regexp x -> Stack_.push (Pcre2_.pcre_compile x, pid, str) regexp);
   (List.rev !semgrep, List.rev !spacegrep, List.rev !aliengrep, List.rev !regexp)
 
-let group_matches_per_pattern_id (xs : Pattern_match.t list) :
-    id_to_match_results =
+let group_matches_per_pattern_id (xs : Core_match.t list) : id_to_match_results
+    =
   let h = Hashtbl.create 101 in
   xs
   |> List.iter (fun (m : PM.t) ->
@@ -183,11 +183,11 @@ let formula_has_as_metavariable (f : R.formula) =
  * this will raise Impossible... Thus, now we have to pass the language(s) that
  * we are specifically targeting. *)
 let (mini_rule_of_pattern :
-      Xlang.t ->
+      Analyzer.t ->
       Rule.t ->
       Pattern.t * bool * Xpattern.pattern_id * string ->
       MR.t) =
- fun xlang rule (pattern, inside, id, pstr) ->
+ fun analyzer rule (pattern, inside, id, pstr) ->
   {
     MR.id = Rule_ID.of_string_exn (string_of_int id);
     pattern;
@@ -199,7 +199,7 @@ let (mini_rule_of_pattern :
     message = "";
     severity = `Error;
     langs =
-      (match xlang with
+      (match analyzer with
       | L (x, xs) -> x :: xs
       | LRegex
       | LSpacegrep
@@ -255,15 +255,15 @@ let matches_of_patterns ~has_as_metavariable ?mvar_context ?range_filter rule
     Core_profiling.times Core_result.match_result =
   let {
     path = { origin; internal_path_to_content };
-    xlang;
+    analyzer;
     lazy_ast_and_errors;
     lazy_content = _;
   } : Xtarget.t =
     xtarget
   in
   let config = (xconf.config, xconf.equivs) in
-  match xlang with
-  | Xlang.L (lang, _) ->
+  match analyzer with
+  | Analyzer.L (lang, _) ->
       let (ast, skipped_tokens), parse_time =
         Common.with_time (fun () -> lazy_force lazy_ast_and_errors)
       in
@@ -272,7 +272,7 @@ let matches_of_patterns ~has_as_metavariable ?mvar_context ?range_filter rule
             let mini_rules =
               patterns
               |> List_.map (function pat, b, c, d ->
-                     mini_rule_of_pattern xlang rule (pat, b, c, d))
+                     mini_rule_of_pattern analyzer rule (pat, b, c, d))
             in
 
             if !debug_timeout || !debug_matches then
@@ -428,7 +428,7 @@ let apply_focus_on_ranges (env : env) (focus_mvars_list : R.focus_mv_list list)
                validation_state = `No_validator;
                severity_override = None;
                metadata_override = None;
-               dependency = None;
+               sca_match = None;
                fix_text = None;
                facts = [];
              })
@@ -532,7 +532,7 @@ let matches_of_xpatterns ~has_as_metavariable ~mvar_context rule
   in
   (* Right now you can only mix semgrep/regexps and spacegrep/regexps, but
    * in theory we could mix all of them together. This is why below
-   * I don't match over xlang and instead assume we could have multiple
+   * I don't match over analyzer and instead assume we could have multiple
    * kinds of patterns at the same time.
    *)
   let patterns, spacegreps, aliengreps, regexps =
@@ -704,11 +704,13 @@ let rec filter_ranges (env : env) (xs : (RM.t * MV.bindings list) list)
              match Metavariable.mvalue_to_expr mval with
              | Some e ->
                  let lang =
-                   match Option.value opt_lang ~default:env.xtarget.xlang with
-                   | Xlang.L (lang, _) -> lang
-                   | Xlang.LRegex
-                   | Xlang.LSpacegrep
-                   | Xlang.LAliengrep ->
+                   match
+                     Option.value opt_lang ~default:env.xtarget.analyzer
+                   with
+                   | Analyzer.L (lang, _) -> lang
+                   | Analyzer.LRegex
+                   | Analyzer.LSpacegrep
+                   | Analyzer.LAliengrep ->
                        raise Impossible
                  in
                  let ast, _ = Lazy.force env.xtarget.lazy_ast_and_errors in
@@ -844,7 +846,7 @@ and get_nested_formula_matches env formula range =
    * as if, for example, we encountered a parse error while parsing the original
    * file as the original language. *)
   let nested_errors =
-    let lang = env.xtarget.xlang |> Xlang.to_string in
+    let lang = env.xtarget.analyzer |> Analyzer.to_string in
     let rule = fst env.rule.id in
     res.RP.errors
     |> E.ErrorSet.map (fun err ->
@@ -879,7 +881,7 @@ and evaluate_formula env opt_context
       *  - bind closer metavariable-regexp with the relevant pattern
       *  - propagate metavariables when intersecting ranges
       *  - distribute filter_range in intersect_range?
-      * See https://github.com/returntocorp/semgrep/issues/2664
+      * See https://github.com/semgrep/semgrep/issues/2664
   *)
   let ranges, filter_expls =
     fold_with_expls

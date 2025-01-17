@@ -42,6 +42,18 @@ val funcbody_to_stmt : AST_generic.function_body -> AST_generic.stmt
 
 (* name building *)
 
+val alias_of_ident : AST_generic.ident -> AST_generic.alias
+
+val mk_import_from_kind :
+  (* from *) AST_generic.ident ->
+  (* as *) AST_generic.ident option ->
+  AST_generic.import_from_kind
+
+val id_of_import_from_kind : AST_generic.import_from_kind -> AST_generic.ident
+
+val alias_opt_of_import_from_kind :
+  AST_generic.import_from_kind -> AST_generic.alias option
+
 val name_of_id : ?case_insensitive:bool -> AST_generic.ident -> AST_generic.name
 
 val name_of_ids :
@@ -69,6 +81,10 @@ val add_suffix_to_name :
 (* Tries to re-interpreted a DotAccess expression a.b.c as an IdQualified. *)
 val name_of_dot_access : AST_generic.expr -> AST_generic.name option
 
+(* fetching a resolved name from Id, IdQualified and DotAccess *)
+val resolved_name_of_dot_access :
+  AST_generic.expr -> AST_generic.resolved_name option
+
 (* name conversions *)
 
 (* You should avoid this function! *)
@@ -76,6 +92,7 @@ val dotted_ident_of_name : AST_generic.name -> AST_generic.dotted_ident
 
 (* misc *)
 
+val id_of_name : AST_generic.name -> AST_generic.ident * AST_generic.id_info
 val name_is_global : AST_generic.resolved_name_kind -> bool
 
 val parameter_to_catch_exn_opt :

@@ -6,16 +6,12 @@
 type call_effect =
   | ToSink of Shape_and_sig.Effect.taints_to_sink
   | ToReturn of Shape_and_sig.Effect.taints_to_return
-  | ToLval of Taint.taints * IL.lval
+  | ToLval of Taint.taints * IL.name * Taint.offset list
 
 type call_effects = call_effect list
 
 val instantiate_function_signature :
   Taint_lval_env.t ->
-  check_lval:(IL.lval -> Taint.Taint_set.t * Shape_and_sig.Shape.shape) ->
-  (* TODO: 'check_lval' is just a way to avoid a recursive dependency with
-   *   'Dataflow_tainting'. We should not need this when all field-sensitive
-   *   taint tracking happens through shapes. *)
   Shape_and_sig.Signature.t ->
   callee:IL.exp ->
   args:IL.exp IL.argument list option (** actual arguments *) ->

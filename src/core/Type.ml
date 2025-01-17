@@ -1,7 +1,16 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2022, 2023 r2c
+ * Copyright (C) 2022, 2023 Semgrep Inc.
  *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation, with the
+ * special exception on linking described in file LICENSE.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
  *)
 open Common
 open Sexplib.Std
@@ -27,6 +36,9 @@ module G = AST_generic
  *
  * These types are polymorphic to support the Pro Engine, which represents
  * resolved names differently.
+ *
+ * history: this used to be in semgrep-pro but was simpler to move it in
+ * OSS because ???
  *)
 
 (*****************************************************************************)
@@ -167,14 +179,16 @@ let todo_kind_to_ast_generic_todo_kind (x : todo_kind) : G.todo_kind =
  * coupling: Inverse of ast_generic_type_of_builtin_type *)
 let builtin_type_of_string _langTODO str =
   match str with
+  | "Integer"
   | "int"
   | "long"
-  | "Integer"
+  | "Int"
   | "Long" ->
       Some Int
   | "float"
   | "double"
-  | "Float" ->
+  | "Float"
+  | "Double" ->
       Some Float
   | "str"
   | "string"

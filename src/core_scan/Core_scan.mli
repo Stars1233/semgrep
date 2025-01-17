@@ -1,8 +1,6 @@
 (* The type of the semgrep "core" scan. We define it here so that
    semgrep and semgrep-proprietary use the same definition *)
 type func = Core_scan_config.t -> Core_result.result_or_exn
-
-(* alias to avoid repeating ourselves in many callers *)
 type caps = < Cap.fork ; Cap.time_limit ; Cap.memory_limit >
 
 (* Entry point. This is used in Core_CLI.ml for semgrep-core,
@@ -28,14 +26,14 @@ type caps = < Cap.fork ; Cap.time_limit ; Cap.memory_limit >
  * or UConsole. In theory, scan() can be completely pure.
  *
  * We require Cap.fork for Parmap.
- * We require Cap.alarm for timeout in Check_rules().
+ * We require Cap.time_limit for timeout in Check_rules().
  *
  * The scan function has the type [func] defined above.
  *
  * Note that this function will run the pre/post scan hook defined
  * in Pre_post_core_scan.hook_processor.
  *)
-val scan : caps -> Core_scan_config.t -> Core_result.result_or_exn
+val scan : < caps ; .. > -> Core_scan_config.t -> Core_result.result_or_exn
 
 (*****************************************************************************)
 (* Utilities functions used in tests or semgrep-pro *)
@@ -61,7 +59,7 @@ val rules_of_config :
    and the per-rule include/exclude patterns; possibly more in the future.
 *)
 val rules_for_target :
-  analyzer:Xlang.t ->
+  analyzer:Analyzer.t ->
   products:Semgrep_output_v1_t.product list ->
   origin:Origin.t ->
   respect_rule_paths:bool ->
@@ -72,7 +70,7 @@ val rules_for_target :
    Compare to select_applicable_rules_for_target which additionally can
    honor per-rule include/exclude patterns based on the target path.
 *)
-val rules_for_analyzer : analyzer:Xlang.t -> Rule.t list -> Rule.t list
+val rules_for_analyzer : analyzer:Analyzer.t -> Rule.t list -> Rule.t list
 
 (* This function prints a dot, which is consumed by pysemgrep to update
    the progress bar if the output_format is Json true.

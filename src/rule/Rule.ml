@@ -12,6 +12,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+module Out = Semgrep_output_v1_t
 
 (* for deriving hash *)
 open Ppx_hash_lib.Std.Hash.Builtin
@@ -67,15 +68,14 @@ type formula = {
   focus : focus_mv_list list;
   (* autofix *)
   fix : string option;
-  (* as:'s *)
-  (* This is for binding a match to a metavariable, such as the following example:
-     @decorator()
-     def $FUNC(...):
-       ...
+  (* This is for binding a match to a metavariable. For example with
+       @decorator()
+       def $FUNC(...):
+         ...
      Without the ability to use `as` to bind this match, we would not be able to
      autofix the entire function, decorator included.
   *)
-  as_ : string option;
+  as_ : Mvar.t option;
 }
 
 and formula_kind =
@@ -103,7 +103,7 @@ and formula_kind =
    * The same is true for pattern-not and pattern-not-inside
    * (see tests/rules/negation_exact.yaml)
    * todo: try to remove this at some point, but difficult. See
-   * https://github.com/returntocorp/semgrep/issues/1218
+   * https://github.com/semgrep/semgrep/issues/1218
    *)
   | Inside of tok * formula
   (* alt: Could do this under a `where` (call it something like `also`).
@@ -130,13 +130,13 @@ and metavar_cond =
       Mvar.t * Xpattern.regexp_string * bool (* constant-propagation *)
   | CondType of
       Mvar.t
-      * Xlang.t option
+      * Analyzer.t option
       (* when the type expression is in different lang *)
       * string list (* raw input string saved for regenerating rule yaml *)
       * AST_generic.type_ list
     (* LATER: could parse lazily, like the patterns *)
   | CondAnalysis of Mvar.t * metavar_analysis_kind
-  | CondNestedFormula of Mvar.t * Xlang.t option * formula
+  | CondNestedFormula of Mvar.t * Analyzer.t option * formula
   | CondName of metavar_cond_name
 
 and metavar_cond_name = {
@@ -168,7 +168,7 @@ and entropy_analysis_mode = Lax | Default | Strict
  * instead improve the engine (e.g., finish steps mode) instead of
  * writing adhoc analysis.
  *)
-and metavar_name_kind = DjangoView
+and metavar_name_kind = DjangoView | ExpressApp | ExpressController
 
 (* Represents all of the metavariables that are being focused by a single
    `focus-metavariable`. *)
@@ -188,10 +188,8 @@ let f kind = mk_formula kind
  * want to migrate to Critical/High/Medium/Low/Info as explained in
  * https://linear.app/semgrep/issue/FIND-1240/unified-severity-levels-across-productslocations
  *)
-type severity = Semgrep_output_v1_t.match_severity [@@deriving show, eq]
-
-type validation_state = Semgrep_output_v1_t.validation_state
-[@@deriving show, eq]
+type severity = Out.match_severity [@@deriving show, eq]
+type validation_state = Out.validation_state [@@deriving show, eq]
 
 (*****************************************************************************)
 (* Taint-specific types *)
@@ -371,13 +369,35 @@ let is_formula_with_focus (formula : formula) =
   | __else__ -> false
 
 (*****************************************************************************)
-(* Extract mode (semgrep as a preprocessor) *)
+(* Supply chain (Pro-only) *)
+(*****************************************************************************)
+
+(* 'r2c-internal-project-depends-on:' in the YAML file.
+ * Here's a breakdown of how this interacts with normal patterns:
+ *  - Rule has only normal patterns:
+ *    Rule behaves as normal
+ *  - Rule has normal patterns *and* an SCA dependency formula:
+ *     * If *both* match, the rule produces "reachable" findings: code findings
+ *       annotated with dependency findings
+ *     * If only the code patterns match, the rule produces *no* findings
+ *     * If only the dependency patterns match, the rule produces "lockfile-only"
+ *       findings: dependency findings without code findings
+ *  - Rule has only SCA dependency formula (a.k.a., parity rules)
+ *    Rule only produces "lockfile-only" findings
+ *
+ * You can only do single layer OR ('depends-on-either:' in the YAML file).
+ *)
+type sca_dependency_formula = (* SCA_Or of *) SCA_pattern.t list
+[@@deriving show, eq]
+
+(*****************************************************************************)
+(* Extract mode (semgrep as a preprocessor, Pro-only) *)
 (*****************************************************************************)
 
 (* See also Extract.ml for extract mode helpers *)
 type extract = {
   formula : formula;
-  dst_lang : Xlang.t;
+  dst_lang : Analyzer.t;
   (* e.g., $...BODY, $CMD *)
   extract : Mvar.t;
   extract_rule_ids : extract_rule_ids option;
@@ -457,6 +477,7 @@ type aws_request = {
   secret_access_key : string;
   access_key_id : string;
   region : string;
+  session_token : string option;
 }
 [@@deriving show]
 
@@ -483,7 +504,7 @@ type http_match_clause = {
   status_code : Parsed_int.t option;
   (* Optional. Empty list if not set *)
   headers : header list;
-  content : (formula * Xlang.t) option;
+  content : (formula * Analyzer.t) option;
 }
 [@@deriving show]
 
@@ -555,6 +576,9 @@ type search_mode = [ `Search of formula ] [@@deriving show]
 type taint_mode = [ `Taint of taint_spec ] [@@deriving show]
 type extract_mode = [ `Extract of extract ] [@@deriving show]
 
+(* a.k.a parity rules, that is for SCA rules without a pattern *)
+type sca_mode = [ `SCA of sca_dependency_formula ] [@@deriving show]
+
 (* Steps mode includes rules that use search_mode and taint_mode.
  * Later, if we keep it, we might want to make all rules have steps,
  * but for the experiment this is easier to remove.
@@ -567,41 +591,11 @@ type steps_mode = [ `Steps of step list ] [@@deriving show]
 and step = {
   step_mode : mode_for_step;
   step_selector : Target_selector.t option;
-  step_analyzer : Xlang.t;
+  step_analyzer : Analyzer.t;
   step_paths : paths option;
 }
 
 and mode_for_step = [ search_mode | taint_mode ] [@@deriving show]
-
-(*****************************************************************************)
-(* Supply chain *)
-(*****************************************************************************)
-
-(* You can only do single layer deep OR *)
-type dependency_formula = dependency_pattern list
-
-(* A pattern to match against versions in a lockfile.
-   This is not like a regular code pattern! It's description of a range of *versions*.
-   For example: ">=1.0.0, <= 2.3.5", which is meant to "match" any version in that interval, e.g. 1.3.5
-
-   Here's a breakdown of how this interacts with normal patterns:
-   * Rule has only normal patterns:
-      Rule behaves as normal
-   * Rule has normal patterns and dependency patterns:
-      If *both* match, the rule produces "reachable" findings: code findings annotated with dependency findings
-      If only the code patterns match, the rule produces *no* findings
-      If only the dependency patterns match, the rule produces "lockfile-only" findings: dependency findings without code findings
-   * Rule has only dependency patterns:
-      Rule only produces "lockfile-only" findings
-*)
-and dependency_pattern = {
-  ecosystem : Semgrep_output_v1_t.ecosystem;
-  package_name : string;
-  version_constraints : Dependency.constraint_ast;
-}
-[@@deriving show, eq]
-
-type sca_mode = [ `SCA of dependency_formula ] [@@deriving show]
 
 (*****************************************************************************)
 (* The rule *)
@@ -618,7 +612,7 @@ type 'mode rule_info = {
   (* Currently a dummy value for extract mode rules *)
   severity : severity;
   (* Note: The two fields target_seletor and target_analyzer below used to
-   * be a single 'languages: Xlang.t' field.
+   * be a single 'languages: Analyzer.t' field.
    * Indeed, for historical reasons, the 'languages:' field in the
    * YAML file is a list of strings. There is no distinction between
    * target *selection* and target *analysis*. This led to oddities for
@@ -669,7 +663,7 @@ type 'mode rule_info = {
    *
    *   target_analyzer = L (Typescript, []);
    *)
-  target_analyzer : Xlang.t;
+  target_analyzer : Analyzer.t;
   (* --------------------------------- *)
   (* OPTIONAL fields *)
   (* --------------------------------- *)
@@ -703,14 +697,16 @@ type 'mode rule_info = {
   (* This is not a concrete field in the rule, but it's derived from
    * other fields (e.g., metadata, mode) in Parse_rule.ml
    *)
-  product : Semgrep_output_v1_t.product;
+  product : Out.product;
+  (* a.k.a. "reachable" rules (the rule contains both a pattern and an SCA dep)*)
+  dependency_formula : sca_dependency_formula option;
+  (* TODO(cooper): would be nice to have nonempty but common2 version not nice to work with; no pp for one *)
+  validators : validator list option;
   (* ex: [("owasp", "A1: Injection")] but can be anything.
    * Metadata was (ab)used for the ("interfile", "true") setting, but this
    * is now done via Rule_options instead.
    *)
   metadata : JSON.t option;
-  (* TODO(cooper): would be nice to have nonempty but common2 version not nice to work with; no pp for one *)
-  validators : validator list option;
   (* Range of Semgrep versions supported by the rule.
    * Note that a rule with these fields may not even be parseable
    * in the current version of Semgrep and wouldn't even reach this point.
@@ -728,7 +724,6 @@ type 'mode rule_info = {
    *)
   min_version : Semver_.t option;
   max_version : Semver_.t option;
-  dependency_formula : dependency_formula option;
 }
 [@@deriving show]
 
@@ -780,7 +775,6 @@ let partition_rules (rules : rules) :
             part_rules search taint extract ({ r with mode = j } :: step) l
         | `SCA _ -> part_rules search taint extract step l)
   in
-
   part_rules [] [] [] [] rules
 
 (* for informational messages *)
@@ -820,7 +814,7 @@ let kind_of_formula = function
   | Not _ ->
       "formula"
 
-let rec formula_of_mode (mode : mode) =
+let rec formulas_of_mode (mode : mode) : formula list =
   match mode with
   | `Search formula -> [ formula ]
   | `Taint { sources = _, sources; sanitizers; sinks = _, sinks; propagators }
@@ -835,7 +829,7 @@ let rec formula_of_mode (mode : mode) =
   | `Extract { formula; extract = _; _ } -> [ formula ]
   | `Steps steps ->
       List.concat_map
-        (fun step -> formula_of_mode (step.step_mode :> mode))
+        (fun step -> formulas_of_mode (step.step_mode :> mode))
         steps
   | `SCA _ -> []
 
@@ -843,14 +837,14 @@ let rec formula_of_mode (mode : mode) =
 (* Converters *)
 (*****************************************************************************)
 
-let selector_and_analyzer_of_xlang (xlang : Xlang.t) :
-    Target_selector.t option * Xlang.t =
-  match xlang with
+let selector_and_analyzer_of_analyzer (analyzer : Analyzer.t) :
+    Target_selector.t option * Analyzer.t =
+  match analyzer with
   | LRegex
   | LAliengrep
   | LSpacegrep ->
-      (None, xlang)
-  | L (lang, other_langs) -> (Some (lang :: other_langs), xlang)
+      (None, analyzer)
+  | L (lang, other_langs) -> (Some (lang :: other_langs), analyzer)
 
 (* return list of "positive" x list of Not *)
 let split_and (xs : formula list) : formula list * (tok * formula) list =
@@ -871,9 +865,11 @@ let split_and (xs : formula list) : formula list * (tok * formula) list =
  * This is used when someone calls `semgrep -e print -l python`
  *)
 
-let rule_of_formula ?fix (xlang : Xlang.t) (formula : formula) : rule =
+let rule_of_formula ?fix (analyzer : Analyzer.t) (formula : formula) : rule =
   let fk = Tok.unsafe_fake_tok "" in
-  let target_selector, target_analyzer = selector_and_analyzer_of_xlang xlang in
+  let target_selector, target_analyzer =
+    selector_and_analyzer_of_analyzer analyzer
+  in
   {
     id = (Rule_ID.dash_e, fk);
     mode = `Search formula;
@@ -899,8 +895,8 @@ let rule_of_formula ?fix (xlang : Xlang.t) (formula : formula) : rule =
     dependency_formula = None;
   }
 
-let rule_of_xpattern ?fix (xlang : Xlang.t) (xpat : Xpattern.t) : rule =
-  rule_of_formula xlang ?fix (f (P xpat))
+let rule_of_xpattern ?fix (analyzer : Analyzer.t) (xpat : Xpattern.t) : rule =
+  rule_of_formula analyzer ?fix (f (P xpat))
 
 (* TODO(dinosaure): Currently, on the Python side, we remove the metadatas and
    serialise the rule into JSON format, then produce the hash from this

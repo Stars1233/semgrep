@@ -13,7 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
-open Fpath_.Operators (* e.g. !! *)
+open Fpath_.Operators
 module Log = Log_tainting.Log
 module G = AST_generic
 module ME = Matching_explanation
@@ -64,7 +64,7 @@ module D = Dataflow_tainting
  *)
 
 type propagator_match = {
-  id : D.var;
+  id : Taint_rule_inst.var;
   rwm : RM.t;
   from : Range.t;
   to_ : Range.t;
@@ -77,6 +77,12 @@ type spec_matches = {
   sanitizers : (RM.t * R.taint_sanitizer) list;
   sinks : (RM.t * R.taint_sink) list;
 }
+
+(*****************************************************************************)
+(* Hooks *)
+(*****************************************************************************)
+
+let hook_mk_taint_spec_match_preds = ref None
 
 (*****************************************************************************)
 (* Finding matches for taint specs *)
@@ -120,6 +126,18 @@ let find_range_w_metas formula_cache (xconf : Match_env.xconfig)
          in
          (ranges |> List_.map (fun rwm -> (rwm, x)), expls))
 
+let find_sources_ranges formula_cache xconf xtarget rule (spec : R.taint_spec) =
+  find_range_w_metas formula_cache xconf xtarget rule
+    (spec.sources |> snd
+    |> List_.map (fun (src : R.taint_source) -> (src.source_formula, src)))
+[@@trace_trace]
+
+let find_sinks_ranges formula_cache xconf xtarget rule (spec : R.taint_spec) =
+  find_range_w_metas formula_cache xconf xtarget rule
+    (spec.sinks |> snd
+    |> List_.map (fun (sink : R.taint_sink) -> (sink.sink_formula, sink)))
+[@@trace_trace]
+
 let find_sanitizers_matches formula_cache (xconf : Match_env.xconfig)
     (xtarget : Xtarget.t) (rule : R.t) (specs : R.taint_sanitizer list) :
     (bool * RM.t * R.taint_sanitizer) list * ME.t list =
@@ -134,6 +152,7 @@ let find_sanitizers_matches formula_cache (xconf : Match_env.xconfig)
          ( ranges
            |> List_.map (fun x -> (sanitizer.R.not_conflicting, x, sanitizer)),
            expls ))
+[@@trace_trace]
 
 (* Finds all matches of `pattern-propagators`. *)
 let find_propagators_matches formula_cache (xconf : Match_env.xconfig)
@@ -197,6 +216,7 @@ let find_propagators_matches formula_cache (xconf : Match_env.xconfig)
                         to_.Range.end_
                     in
                     Some { id; rwm; from; to_; spec = p }))
+[@@trace_trace]
 
 (*****************************************************************************)
 (* Spec matches *)
@@ -212,21 +232,19 @@ let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
   let xtarget : Xtarget.t =
     {
       path = { origin = File file; internal_path_to_content = file };
-      xlang = rule.target_analyzer;
+      analyzer = rule.target_analyzer;
       lazy_content = lazy (UFile.read_file file);
       lazy_ast_and_errors;
     }
   in
   let (sources_ranges : (RM.t * R.taint_source) list), expls_sources =
-    find_range_w_metas formula_cache xconf xtarget rule
-      (spec.sources |> snd
-      |> List_.map (fun (src : R.taint_source) -> (src.source_formula, src)))
-  and (propagators_ranges : propagator_match list) =
+    find_sources_ranges formula_cache xconf xtarget rule spec
+  in
+  let (propagators_ranges : propagator_match list) =
     find_propagators_matches formula_cache xconf xtarget rule spec.propagators
-  and (sinks_ranges : (RM.t * R.taint_sink) list), expls_sinks =
-    find_range_w_metas formula_cache xconf xtarget rule
-      (spec.sinks |> snd
-      |> List_.map (fun (sink : R.taint_sink) -> (sink.sink_formula, sink)))
+  in
+  let (sinks_ranges : (RM.t * R.taint_sink) list), expls_sinks =
+    find_sinks_ranges formula_cache xconf xtarget rule spec
   in
   let sanitizers_ranges, expls_sanitizers =
     match spec.sanitizers with
@@ -318,27 +336,6 @@ let option_bind_list opt f =
   | None -> []
   | Some x -> f x
 
-module Range_table = struct
-  module T = Hashtbl.Make (struct
-    type t = Range.t
-
-    let equal = Range.equal
-    let hash = Hashtbl.hash
-  end)
-
-  let create () = T.create 100
-
-  let push tbl k v =
-    match T.find_opt tbl k with
-    | None -> T.add tbl k [ v ]
-    | Some vs -> T.replace tbl k (v :: vs)
-
-  let get tbl k =
-    match T.find_opt tbl k with
-    | None -> []
-    | Some vs -> vs
-end
-
 let range_of_any any =
   (* This is potentially slow. We may need to store range position in
    * the AST at some point. *)
@@ -369,67 +366,7 @@ let overlap_with ~match_range r =
   float_of_int (r.Range.end_ - r.Range.start + 1)
   /. float_of_int (r1.Range.end_ - r1.Range.start + 1)
 
-let any_is_in_sources_matches rule any matches =
-  let ( let* ) = option_bind_list in
-  let* r = range_of_any any in
-  matches
-  |> List_.filter_map (fun (rwm, (ts : R.taint_source)) ->
-         if Range.( $<=$ ) r rwm.RM.r then
-           Some
-             (let spec_pm = RM.range_to_pattern_match_adjusted rule rwm in
-              let overlap = overlap_with ~match_range:rwm.RM.r r in
-              {
-                Taint_spec_match.spec = ts;
-                spec_id = ts.source_id;
-                spec_pm;
-                range = r;
-                overlap;
-              })
-         else None)
-
-(* Builds a table to quickly look up for propagator matches, taking advantage of
- * the requirement that propagators must be exact matches.
- *
- * OBS: Previously we allowed these matches if they had an overlap of >0.99, but
- *   to be honest that was arbitrary and fragile (the overlap largely depends on
- *   the amount of text being matched). Typically propagators from/to match
- *   l-values and those typically we can count as being 100% perfect matches.
- *   If this causes problems we can always roll back, but all tests still work.
- *)
-let propagators_table_of_matches rule matches =
-  let mk_match (prop : propagator_match) var kind r =
-    let spec_pm = RM.range_to_pattern_match_adjusted rule prop.rwm in
-    let spec : D.a_propagator = { kind; prop = prop.spec; var } in
-    {
-      Taint_spec_match.spec;
-      spec_id = prop.spec.propagator_id;
-      spec_pm;
-      range = r;
-      overlap = 1.0;
-    }
-  in
-  let tbl = Range_table.create () in
-  matches
-  |> List.iter (fun (prop : propagator_match) ->
-         let var = prop.id in
-         Range_table.push tbl prop.to_ (mk_match prop var `To prop.to_);
-         Range_table.push tbl prop.from (mk_match prop var `From prop.from));
-  tbl
-
-(* Check whether `any` matches either the `from` or the `to` of any of the
- * `pattern-propagators`. Matches must be exact to make taint propagation
- * more precise and predictable.
- *
- * THINK: Now that we have "Best_matches" we could perhaps use that for
- *   propagators too?
- *)
-let any_is_in_propagators_matches any tbl :
-    D.a_propagator Taint_spec_match.t list =
-  match range_of_any any with
-  | None -> []
-  | Some r -> Range_table.get tbl r
-
-let any_is_in_sanitizers_matches rule any matches =
+let any_is_in_matches_OSS rule matches ~get_id any =
   let ( let* ) = option_bind_list in
   let* r = range_of_any any in
   matches
@@ -438,32 +375,66 @@ let any_is_in_sanitizers_matches rule any matches =
            Some
              (let spec_pm = RM.range_to_pattern_match_adjusted rule rwm in
               let overlap = overlap_with ~match_range:rwm.RM.r r in
-              {
-                Taint_spec_match.spec;
-                spec_id = spec.R.sanitizer_id;
-                spec_pm;
-                range = r;
-                overlap;
-              })
+              Taint_spec_match.
+                { spec; spec_id = get_id spec; spec_pm; range = r; overlap })
          else None)
 
-let any_is_in_sinks_matches rule any matches =
-  let ( let* ) = option_bind_list in
-  let* r = range_of_any any in
-  matches
-  |> List_.filter_map (fun (rwm, (spec : R.taint_sink)) ->
-         if Range.( $<=$ ) r rwm.RM.r then
-           Some
-             (let spec_pm = RM.range_to_pattern_match_adjusted rule rwm in
-              let overlap = overlap_with ~match_range:rwm.RM.r r in
-              {
-                Taint_spec_match.spec;
-                spec_id = spec.sink_id;
-                spec_pm;
-                range = r;
-                overlap;
-              })
-         else None)
+let is_exact_match ~match_range r =
+  let overlap = overlap_with ~match_range r in
+  let r1 = match_range in
+  Range.( $<=$ ) r r1 && overlap > 0.99
+
+let mk_propagator_match rule (prop : propagator_match) var kind r =
+  let spec_pm = RM.range_to_pattern_match_adjusted rule prop.rwm in
+  let spec : Taint_rule_inst.a_propagator = { kind; prop = prop.spec; var } in
+  {
+    Taint_spec_match.spec;
+    spec_id = prop.spec.propagator_id;
+    spec_pm;
+    range = r;
+    overlap = 1.0;
+  }
+
+(* Check whether `any` matches either the `from` or the `to` of any of the
+ * `pattern-propagators`. Matches must be exact (overlap > 0.99) to make
+ * taint propagation more precise and predictable. *)
+let any_is_in_propagators_matches_OSS rule matches any :
+    Taint_rule_inst.a_propagator Taint_spec_match.t list =
+  match range_of_any any with
+  | None -> []
+  | Some r ->
+      matches
+      |> List.concat_map (fun prop ->
+             let var = prop.id in
+             let is_from = is_exact_match ~match_range:prop.from r in
+             let is_to = is_exact_match ~match_range:prop.to_ r in
+             let mk_match kind = mk_propagator_match rule prop var kind r in
+             (if is_from then [ mk_match `From ] else [])
+             @ (if is_to then [ mk_match `To ] else [])
+             @ [])
+
+let mk_taint_spec_match_preds rule matches =
+  match !hook_mk_taint_spec_match_preds with
+  | None ->
+      Taint_rule_inst.
+        {
+          is_source =
+            (fun any ->
+              any_is_in_matches_OSS rule matches.sources any
+                ~get_id:(fun (ts : R.taint_source) -> ts.source_id));
+          is_propagator =
+            (fun any ->
+              any_is_in_propagators_matches_OSS rule matches.propagators any);
+          is_sanitizer =
+            (fun any ->
+              any_is_in_matches_OSS rule matches.sanitizers any
+                ~get_id:(fun (ts : R.taint_sanitizer) -> ts.sanitizer_id));
+          is_sink =
+            (fun any ->
+              any_is_in_matches_OSS rule matches.sinks any
+                ~get_id:(fun (ts : R.taint_sink) -> ts.sink_id));
+        }
+  | Some hook -> hook rule matches
 
 (*****************************************************************************)
 (* Entry point *)
@@ -472,33 +443,28 @@ let any_is_in_sinks_matches rule any matches =
 let default_effect_handler _fun_name new_effects = new_effects
 
 let taint_config_of_rule ~per_file_formula_cache
-    ?(handle_effects = default_effect_handler) xconf file ast_and_errors
+    ?(handle_effects = default_effect_handler) xconf lang file ast_and_errors
     ({ mode = `Taint spec; _ } as rule : R.taint_rule) =
   let spec_matches, expls =
-    spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
-      rule
+    spec_matches_of_taint_rule ~per_file_formula_cache xconf !!file
+      ast_and_errors rule
   in
-  let file = Fpath.v file in
   let xconf = Match_env.adjust_xconfig_with_rule_options xconf rule.options in
-  let propagators_tbl =
-    propagators_table_of_matches rule spec_matches.propagators
-  in
-  let config = xconf.config in
-  ( {
-      Dataflow_tainting.filepath = !!file;
-      rule_id = fst rule.R.id;
-      track_control =
-        spec.sources |> snd
-        |> List.exists (fun (src : R.taint_source) -> src.source_control);
-      is_source =
-        (fun x -> any_is_in_sources_matches rule x spec_matches.sources);
-      is_propagator = (fun x -> any_is_in_propagators_matches x propagators_tbl);
-      is_sanitizer =
-        (fun x -> any_is_in_sanitizers_matches rule x spec_matches.sanitizers);
-      is_sink = (fun x -> any_is_in_sinks_matches rule x spec_matches.sinks);
-      unify_mvars = config.taint_unify_mvars;
-      handle_effects;
-    },
+  let options = xconf.config in
+  let preds = mk_taint_spec_match_preds rule spec_matches in
+  ( Taint_rule_inst.
+      {
+        lang;
+        file;
+        rule_id = fst rule.R.id;
+        options;
+        track_control =
+          spec.sources |> snd
+          |> List.exists (fun (src : R.taint_source) -> src.source_control);
+        preds;
+        handle_effects;
+        java_props_cache = Hashtbl.create 30;
+      },
     spec_matches,
     expls )
 [@@trace_trace]
