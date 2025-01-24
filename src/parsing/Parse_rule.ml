@@ -80,11 +80,11 @@ let parse_language ~id ((s, t) as _lang) : (Lang.t, Rule_error.t) result =
    This decouples target selection from pattern parsing.
 
    TODO: note that there's a few places in this file where we use
-   Xlang.of_string which allows "spacegrep" and "aliengrep" so
+   Analyzer.of_string which allows "spacegrep" and "aliengrep" so
    this might lead to inconsistencies as here we allow just "generic".
 *)
 let parse_languages ~id (options : Rule_options_t.t) langs :
-    (Target_selector.t option * Xlang.t, Rule_error.t) result =
+    (Target_selector.t option * Analyzer.t, Rule_error.t) result =
   match langs with
   | [ (("none" | "regex"), _t) ] -> Ok (None, LRegex)
   | [ ("generic", _t) ] -> (
@@ -101,7 +101,7 @@ let parse_languages ~id (options : Rule_options_t.t) langs :
       in
       match langs with
       | [] -> error rule_id (snd id) "we need at least one language"
-      | x :: xs -> Ok (Some langs, Xlang.L (x, xs)))
+      | x :: xs -> Ok (Some langs, Analyzer.L (x, xs)))
 
 let parse_severity ~id (s, t) : (Rule.severity, Rule_error.t) result =
   match s with
@@ -500,14 +500,14 @@ let parse_taint_pattern env key (value : G.expr) =
 (*****************************************************************************)
 
 (* TODO: factorize code with parse_languages *)
-let parse_extract_dest ~id lang : (Xlang.t, Rule_error.t) result =
+let parse_extract_dest ~id lang : (Analyzer.t, Rule_error.t) result =
   match lang with
   | ("none" | "regex"), _ -> Ok LRegex
   | ("generic" | "spacegrep"), _ -> Ok LSpacegrep
   | "aliengrep", _ -> Ok LAliengrep
   | lang ->
       let/ lang = parse_language ~id lang in
-      Ok (Xlang.L (lang, []))
+      Ok (Analyzer.L (lang, []))
 
 let parse_extract_reduction ~id (s, t) =
   match s with
@@ -731,8 +731,8 @@ let parse_http_matcher_clause key env value :
           take_opt content env parse_string "language"
           |> Result.map
                (Option.map
-                  (Xlang.of_string ~rule_id:(Rule_ID.to_string env.id)))
-          |> Result.map (Option.value ~default:Xlang.LAliengrep)
+                  (Analyzer.of_string ~rule_id:(Rule_ID.to_string env.id)))
+          |> Result.map (Option.value ~default:Analyzer.LAliengrep)
         in
         Ok (Some (formula, language))
     | Ok None -> Ok None
@@ -786,7 +786,8 @@ let parse_aws_request env key value : (Rule.aws_request, Rule_error.t) result =
   in
   let/ access_key_id = take_key request_dict env parse_string "access_key_id" in
   let/ region = take_key request_dict env parse_string "region" in
-  Ok Rule.{ secret_access_key; access_key_id; region }
+  let/ session_token = take_opt request_dict env parse_string "session_token" in
+  Ok Rule.{ secret_access_key; access_key_id; region; session_token }
 
 let parse_aws_validator env key value : (Rule.validator, Rule_error.t) result =
   let/ validator_dict = parse_dict env key value in
@@ -820,21 +821,22 @@ let parse_ecosystem env key value =
   | _ -> error_at_key env.id key "Non-string data for ecosystem?"
 
 let parse_dependency_pattern key env value :
-    (R.dependency_pattern, Rule_error.t) result =
+    (SCA_pattern.t, Rule_error.t) result =
   let/ rd = parse_dict env key value in
   let/ ecosystem = take_key rd env parse_ecosystem "namespace" in
   let/ package_name = take_key rd env parse_string "package" in
+  let/ version_str = take_key rd env parse_string "version" in
   let/ version_constraints =
-    (* TODO: version parser *)
-    take_key rd env parse_string "version"
-    |> Result.map (fun _ ->
-           Dependency.And
-             [ { version = Other "not implemented"; constraint_ = Eq } ])
+    try Ok (Parse_SCA_version.parse_constraints version_str) with
+    | Parse_SCA_version.Error error_str ->
+        error_at_key env.id key
+          (spf "bad version constraint format for %s, error = %s" version_str
+             error_str)
   in
-  Ok R.{ ecosystem; package_name; version_constraints }
+  Ok SCA_pattern.{ ecosystem; package_name; version_constraints }
 
 let parse_dependency_formula env key value :
-    (R.dependency_formula, Rule_error.t) result =
+    (R.sca_dependency_formula, Rule_error.t) result =
   let/ rd = parse_dict env key value in
   if Hashtbl.mem rd.h "depends-on-either" then
     take_key rd env
@@ -956,7 +958,7 @@ let check_version_compatibility rule_id ~min_version ~max_version =
    products. This basically just copies the logic of
    semgrep/cli/src/semgrep/rule.py::Rule.product *)
 let parse_product (metadata : J.t option)
-    (dep_formula_opt : R.dependency_formula option) :
+    (dep_formula_opt : R.sca_dependency_formula option) :
     Semgrep_output_v1_t.product =
   match dep_formula_opt with
   | Some _ -> `SCA
@@ -987,7 +989,19 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
   let/ max_version = take_opt_no_env rd parse_version "max-version" in
   let/ () = check_version_compatibility rule_id ~min_version ~max_version in
 
-  let/ languages = take_no_env rd parse_string_wrap_list_no_env "languages" in
+  let/ languages_opt =
+    take_opt_no_env rd parse_string_wrap_list_no_env "languages"
+  in
+  let/ languages =
+    match languages_opt with
+    | Some languages -> Ok languages
+    (* TODO: join-mode does not have languages and is not recognized right now
+     * by semgrep-core
+     * TODO? steps-mode or rules using just pattern-regex could also skip
+     * the languages section? (and use target selector instead)
+     *)
+    | None -> H.error rule_id tok "missing languages"
+  in
   let/ options_opt, options_key =
     let/ options = take_opt_no_env rd (parse_options rule_id) "options" in
     match options with
@@ -1202,11 +1216,11 @@ let parse_and_filter_invalid_rules ?rewrite_rule_ids (file : Fpath.t) :
   Ok (rules, errors)
 [@@profiling]
 
-let parse_xpattern xlang (str, tok) =
+let parse_xpattern analyzer (str, tok) =
   let env =
     {
       id = Rule_ID.of_string_exn "anon-pattern";
-      target_analyzer = xlang;
+      target_analyzer = analyzer;
       in_metavariable_pattern = false;
       path = [];
       options_key = None;
@@ -1215,15 +1229,15 @@ let parse_xpattern xlang (str, tok) =
   in
   Parse_rule_formula.parse_rule_xpattern env (str, tok)
 
-let parse_fake_xpattern xlang str =
+let parse_fake_xpattern analyzer str =
   let fk = Tok.unsafe_fake_tok "" in
-  parse_xpattern xlang (str, fk)
+  parse_xpattern analyzer (str, fk)
 
 (*****************************************************************************)
 (* Useful for tests *)
 (*****************************************************************************)
 
-let parse file =
+let parse (file : Fpath.t) : (Rule.rules, Rule_error.t) result =
   let/ xs, _skipped = parse_file ~error_recovery:false file in
   (* The skipped rules include Apex rules and other rules that are always
      skippable. *)

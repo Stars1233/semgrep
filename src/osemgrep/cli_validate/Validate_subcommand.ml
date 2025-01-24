@@ -87,15 +87,15 @@ let metarules_pack = "p/semgrep-rule-lints"
 (*****************************************************************************)
 
 (* alt: could reuse the one in Test_subcommand.ml *)
-let hook_pro_init : (unit -> unit) ref =
-  ref (fun () ->
+let hook_pro_init : (unit -> unit) Hook.t =
+  Hook.create (fun () ->
       failwith
         "semgrep validate --pro not available (need --install-semgrep-pro)")
 
 (*****************************************************************************)
 (* Targeting (finding the semgrep yaml files to validate) *)
 (*****************************************************************************)
-let find_targets_rules (caps : caps) ~(strict : bool) ~token_opt
+let find_targets_rules (caps : < caps ; .. >) ~(strict : bool) ~token_opt
     (rules_source : Rules_source.t) : Fpath.t list * int * int * int =
   (* Checking (1) and (2). Parsing the rules is already a form of validation.
    * Before running metachecks on those rules, we make sure we can parse them.
@@ -165,8 +165,8 @@ let find_targets_rules (caps : caps) ~(strict : bool) ~token_opt
 (*****************************************************************************)
 
 (* Checking (3) *)
-let check_targets_rules (caps : caps) ~token_opt targets_rules core_runner_conf
-    =
+let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
+    core_runner_conf =
   let in_docker = !Semgrep_envvars.v.in_docker in
   let (config : Rules_config.t) =
     Rules_config.parse_config_string ~in_docker metarules_pack
@@ -186,8 +186,7 @@ let check_targets_rules (caps : caps) ~token_opt targets_rules core_runner_conf
 
   (* TODO? why using Core_runner instead of directly Core_scan? *)
   let core_run_func =
-    Core_runner.mk_core_run_for_osemgrep
-      (Core_scan.scan (caps :> Core_scan.caps))
+    Core_runner.mk_core_run_for_osemgrep (Core_scan.scan caps)
   in
   let result_or_exn =
     core_run_func.run core_runner_conf Find_targets.default_conf (metarules, [])
@@ -257,7 +256,7 @@ let report_errors (_caps : < Cap.stdout >) ~metacheck_errors ~num_errors
 (* Run the conf *)
 (*****************************************************************************)
 
-let run_conf (caps : caps) (conf : Validate_CLI.conf) : Exit_code.t =
+let run_conf (caps : < caps ; .. >) (conf : Validate_CLI.conf) : Exit_code.t =
   CLI_common.setup_logging ~force_color:true ~level:conf.common.logging_level;
   (* Metrics_.configure Metrics_.On; ?? and allow to disable it?
    * semgrep-rules/Makefile is running semgrep --validate with metrics=off
@@ -266,7 +265,7 @@ let run_conf (caps : caps) (conf : Validate_CLI.conf) : Exit_code.t =
    * those options and we should disable metrics (and version-check) by default.
    *)
   Logs.debug (fun m -> m "conf = %s" (Validate_CLI.show_conf conf));
-  if conf.pro then !hook_pro_init ();
+  if conf.pro then (Hook.get hook_pro_init) ();
 
   let settings = Semgrep_settings.load () in
   (* needed for fetching the metachecking rules ? those are not public?
@@ -302,6 +301,6 @@ let run_conf (caps : caps) (conf : Validate_CLI.conf) : Exit_code.t =
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
-let main (caps : caps) (argv : string array) : Exit_code.t =
+let main (caps : < caps ; .. >) (argv : string array) : Exit_code.t =
   let conf = Validate_CLI.parse_argv argv in
   run_conf caps conf

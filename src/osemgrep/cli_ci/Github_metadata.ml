@@ -16,6 +16,8 @@ module Cmdl = Cmdliner.Cmd
 
 (* See https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables *)
 
+(* TODO: don't start field names with an underscore because it prevents
+   some warnings (e.g. unused variable) *)
 type env = {
   (* actually GITHUB_EVENT_PATH *)
   _GITHUB_EVENT_JSON : Yojson.Basic.t;
@@ -156,7 +158,7 @@ let shallow_fetch_branch (caps : < Cap.exec >) branch_name =
         "--depth=1";
         "--force";
         "--update-head-ok";
-        Fmt.str "%s:%s" branch_name branch_name;
+        spf "%s:%s" branch_name branch_name;
       ]
   in
   ()
@@ -316,7 +318,7 @@ let rec find_branchoff_point (caps : < Cap.exec ; Cap.network >)
           "--update-head-ok";
           "--depth";
           string_of_int fetch_depth;
-          Fmt.str "%s:%s" base_branch_name base_branch_name;
+          spf "%s:%s" base_branch_name base_branch_name;
         ]
     in
     let _ =
@@ -341,18 +343,21 @@ let rec find_branchoff_point (caps : < Cap.exec ; Cap.network >)
           Digestif.SHA1.to_hex head_branch_hash;
         ] )
     in
-    match UCmd.string_of_run ~trim:true cmd with
+    match CapExec.string_of_run caps#exec ~trim:true cmd with
     | Ok (merge_base, (_, `Exited 0)) ->
         Lwt.return (Digestif.SHA1.of_hex_opt merge_base)
     | Ok (_, _) when attempt_count < _MAX_FETCH_ATTEMPT_COUNT ->
         find_branchoff_point caps ~attempt_count:(succ attempt_count) repo_name
           env
     | Ok (_, _) ->
-        Fmt.failwith
-          "Could not find branch-off point between the baseline tip %s@%a and \
-           current head %s@%a"
-          base_branch_name Digestif.SHA1.pp base_branch_hash head_branch_name
-          Digestif.SHA1.pp head_branch_hash
+        failwith
+          (spf
+             "Could not find branch-off point between the baseline tip %s@%s \
+              and current head %s@%s"
+             base_branch_name
+             (Fmt_.to_show Digestif.SHA1.pp base_branch_hash)
+             head_branch_name
+             (Fmt_.to_show Digestif.SHA1.pp head_branch_hash))
     | Error (`Msg err) -> failwith err
 [@@warning "-32"]
 (* TODO: why unused? *)
@@ -471,7 +476,7 @@ class meta caps ~baseline_ref env gha_env =
       | None -> (
           match (super#repo_url, gha_env._GITHUB_RUN_ID) with
           | Some repo_url, Some value ->
-              Some (Uri.with_path repo_url (Fmt.str "/actions/runs/%s" value))
+              Some (Uri.with_path repo_url (spf "/actions/runs/%s" value))
           | _ -> None)
 
     method! event_name =

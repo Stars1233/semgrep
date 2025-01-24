@@ -158,7 +158,7 @@ let rec modifier (x, tok) =
   | Volatile -> G.attr G.Volatile tok
   | Synchronized -> G.unhandled_keywordattr (s, tok)
   | Native -> G.unhandled_keywordattr (s, tok)
-  | DefaultModifier -> G.unhandled_keywordattr (s, tok)
+  | DefaultModifier -> G.attr G.DefaultImpl tok
   | Sealed -> G.attr G.SealedClass tok
   | NonSealed -> G.unhandled_keywordattr (s, tok)
   | Annotation v1 -> annotation v1
@@ -731,7 +731,7 @@ and import = function
   | ImportAll (t, xs, tok) -> G.ImportAll (t, G.DottedName xs, tok)
   | ImportFrom (t, xs, id) ->
       let id = ident id in
-      G.ImportFrom (t, G.DottedName xs, [ (id, None) ])
+      G.ImportFrom (t, G.DottedName xs, [ H.mk_import_from_kind id None ])
 
 and directive = function
   | Import (static, v2) ->

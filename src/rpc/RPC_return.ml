@@ -41,50 +41,32 @@ let autofix (dryrun : bool) (edits : Out.edit list) :
 
 let format (kind : Out.output_format) (ctx : Out.format_context)
     (cli_output : Out.cli_output) : string =
-  (* TODO: use is_logged_in for the logged_in gated export fields *)
-  ignore ctx;
-  let xs = Output.format kind cli_output in
+  let xs = Output.format kind ctx cli_output in
   String.concat "\n" xs
 
-let sarif_format _caps hide_nudge engine_label show_dataflow_traces
-    (rules : Out.fpath) (cli_matches : Out.cli_match list)
-    (cli_errors : Out.cli_error list) =
+let sarif_format _caps (rules : Out.fpath) (ctx : Out.format_context) ~is_pro
+    ~show_dataflow_traces (cli_output : Out.cli_output) : string =
   let fake_config =
     {
       Core_scan_config.default with
       rule_source = Core_scan_config.Rule_file rules;
     }
   in
-  let rules, _invalid_rules =
-    Core_scan.rules_of_config ~filter_by_targets:false fake_config
-  in
+  let rules, invalid_rules = Core_scan.rules_of_config fake_config in
+  (* we already use Log.warn in Parse_rule.ml but worth repeating with Logs
+   * TODO? where do the RPC logs go? using --debug does not show RPCs
+   * logs; only failures are visible.
+   *)
+  if not (List_.null invalid_rules) then
+    (* nosemgrep: no-logs-in-library *)
+    Logs.warn (fun m ->
+        m "skipping %d invalid rules in SARIF RPC" (List.length invalid_rules));
   let hrules = Rule.hrules_of_rules rules in
-  let cli_output : Out.cli_output =
-    {
-      results = cli_matches;
-      errors = cli_errors;
-      (* The only fields that matter for sarif are cli_output.results and cli_output.errors,
-       * so the rest of the fields are just populated with the minimal amount of info
-       *)
-      version = None;
-      paths = { scanned = []; skipped = None };
-      time = None;
-      explanations = None;
-      rules_by_engine = None;
-      engine_requested = None;
-      interfile_languages_used = None;
-      skipped_rules = [];
-    }
+  let sarif_json =
+    Sarif_output.sarif_output hrules ctx cli_output ~is_pro
+      ~show_dataflow_traces
   in
-  let output, format_time_seconds =
-    Common.with_time (fun () ->
-        let sarif_json =
-          Sarif_output.sarif_output hide_nudge engine_label show_dataflow_traces
-            hrules cli_output
-        in
-        Sarif.Sarif_v_2_1_0_j.string_of_sarif_json_schema sarif_json)
-  in
-  (output, format_time_seconds)
+  Sarif.Sarif_v_2_1_0_j.string_of_sarif_json_schema sarif_json
 
 let contributions (caps : < Cap.exec >) : Out.contributions =
   Parse_contribution.get_contributions caps

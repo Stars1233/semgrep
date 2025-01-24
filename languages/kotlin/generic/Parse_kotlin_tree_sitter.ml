@@ -430,7 +430,8 @@ let import_header (env : env) ((v1, v2, v3, v4) : CST.import_header) : directive
           | [] -> raise Common.Impossible
           | x :: xs -> (x, List.rev xs)
         in
-        ImportFrom (v1, DottedName module_name, [ (ident, None) ])
+        ImportFrom
+          (v1, DottedName module_name, [ H2.mk_import_from_kind ident None ])
   in
   let _v4 = semi env v4 (* pattern [\r\n]+ *) in
   v3 |> G.d
@@ -652,7 +653,7 @@ and class_declaration (env : env) (x : CST.class_declaration) :
       (* alt: we could identify in the list below the class with arguments,
        * which is the 'cextends', and put the rest in 'cimplements'.
        * Either.Right now we just put everything in 'cextends' and have
-       * Generic_vs_generic.m_list__m_class_parent do clever matching.
+       * m_list__m_class_parent do clever matching.
        *)
       let cextends =
         match v6 with

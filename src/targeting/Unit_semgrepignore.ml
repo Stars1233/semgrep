@@ -31,7 +31,7 @@ let test_filter ?excludes:cli_patterns (files : F.t list) selection () =
       assert (files2 = files);
       printf "--- Filtered files ---\n";
       let filter =
-        Semgrepignore.create ?cli_patterns ~builtin_semgrepignore:Empty
+        Semgrepignore.create ?cli_patterns ~default_semgrepignore_patterns:Empty
           ~exclusion_mechanism:
             { use_gitignore_files = true; use_semgrepignore_files = true }
           ~project_root:root ()
@@ -86,6 +86,31 @@ let tests =
         (test_filter
            [ File (".semgrepignore", "hello.*"); file "hello.c"; file "bye.c" ]
            [ ("/hello.c", false); ("/bye.c", true) ]);
+      t "legacy semgrepignore with :include"
+        (test_filter
+           [
+             File
+               ( ".semgrepignore",
+                 "a\n  :include   subdir/extra-semgrepignore \n" );
+             file "a";
+             file "b";
+             file "c";
+             dir "subdir"
+               [
+                 (* exclude only the 'b' file at the root, not the one in
+                    this folder *)
+                 File ("extra-semgrepignore", "/b\n");
+                 file "a";
+                 file "b";
+               ];
+           ]
+           [
+             ("/a", false);
+             ("/b", false);
+             ("/c", true);
+             ("/subdir/a", false);
+             ("/subdir/b", true);
+           ]);
       t "deep semgrepignore + gitignore"
         (test_filter
            [

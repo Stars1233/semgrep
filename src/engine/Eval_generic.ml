@@ -471,7 +471,7 @@ let text_of_binding mvar mval =
       (* Note that `text` may be produced by constant folding, in which
        * case we will not have range info. *)
       Some text
-  (* There are a few places in Generic_vs_generic where we build artificial
+  (* There are a few places in Pattern_vs_code where we build artificial
    * code on-the-fly (e.g., a Name from an ImportedEntity), in which case the
    * tokens in this code should not be used to get the string content
    * of the code. Unfortunately, a metavariable can be bound to such
@@ -613,11 +613,11 @@ let eval_bool env e facts bindings =
        * and $Y > 0 needs the facts. perhaps instead of raise (NotHandled code) in
        * eval_op, we can first try to find a fact that implies $X > 0 or its negation.
        *)
-      match !Dataflow_when.hook_facts_satisfy_e with
+      match Hook.get Dataflow_when.hook_facts_satisfy_e with
       | None -> false
       | Some facts_satisfy_e -> facts_satisfy_e bindings facts e)
   | None -> (
       Log.err (fun m -> m "got exn during eval_bool");
-      match !Dataflow_when.hook_facts_satisfy_e with
+      match Hook.get Dataflow_when.hook_facts_satisfy_e with
       | None -> false
       | Some facts_satisfy_e -> facts_satisfy_e bindings facts e)

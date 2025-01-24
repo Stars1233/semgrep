@@ -36,6 +36,11 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
   open M
 
   type ctx = unit
+  type 'a with_context = ?ctx:ctx -> 'a
+  type 'a io = 'a Lwt.t
+  type body = Cohttp_lwt.Body.t
+
+  let map_context (x : 'a with_context) (f : 'a -> 'b) ?ctx = x ?ctx |> f
 
   let mock_response_of_request (req : Cohttp.Request.t) (body : Body.t) =
     Logs.debug (fun m ->
@@ -45,32 +50,6 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
     Logs.debug (fun m -> m "[Testing client] Body: %s" _body);
     let%lwt response = make_response req body in
     Lwt.return (response.response, response.body)
-
-  let callv ?ctx uri (reqs : (Cohttp.Request.t * Body.t) Lwt_stream.t) =
-    ignore ctx;
-    Logs.debug (fun m ->
-        m "[Testing client] Request URI: %s" (Uri.to_string uri));
-    let response_stream =
-      Lwt_stream.map_s
-        (fun (req, body) -> mock_response_of_request req body)
-        reqs
-    in
-    Lwt.return response_stream
-
-  let head ?ctx ?headers _ =
-    ignore ctx;
-    ignore headers;
-    failwith
-      "head is not implemented in the HTTP mock client. If you need this \
-       functionality, please implement it."
-
-  let post_form ?ctx ?headers ~params _ =
-    ignore ctx;
-    ignore headers;
-    ignore params;
-    failwith
-      "post_form is not implemented in the HTTP mock client. If you need this \
-       functionality, please implement it."
 
   let call ?ctx ?headers ?(body = `Empty) ?chunked meth uri =
     ignore ctx;
@@ -89,6 +68,13 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
     let req = Request.make_for_client ~headers ~chunked meth uri in
     mock_response_of_request req body
 
+  let head ?ctx ?headers _ =
+    ignore ctx;
+    ignore headers;
+    failwith
+      "head is not implemented in the HTTP mock client. If you need this \
+       functionality, please implement it."
+
   let get ?ctx ?headers uri = call ?ctx ?headers `GET uri
 
   let delete ?ctx ?body ?chunked ?headers uri =
@@ -102,6 +88,30 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
 
   let patch ?ctx ?body ?chunked ?headers uri =
     call ?ctx ?headers ?body ?chunked `PATCH uri
+
+  let set_cache _ =
+    failwith
+      "http set_cache is not implemented in the HTTP mock client. If you need \
+       this functionality, please implement it."
+
+  let post_form ?ctx ?headers ~params _ =
+    ignore ctx;
+    ignore headers;
+    ignore params;
+    failwith
+      "post_form is not implemented in the HTTP mock client. If you need this \
+       functionality, please implement it."
+
+  let callv ?ctx uri (reqs : (Cohttp.Request.t * Body.t) Lwt_stream.t) =
+    ignore ctx;
+    Logs.debug (fun m ->
+        m "[Testing client] Request URI: %s" (Uri.to_string uri));
+    let response_stream =
+      Lwt_stream.map_s
+        (fun (req, body) -> mock_response_of_request req body)
+        reqs
+    in
+    Lwt.return response_stream
 end
 
 (*****************************************************************************)
@@ -110,11 +120,11 @@ end
 
 let basic_response ?(status = 200) ?(headers = Header.init ()) body =
   let status = Cohttp.Code.status_of_code status in
-  let response = Response.make ~status ~headers ~flush:true () in
+  let response = Response.make ~status ~headers () in
   { response; body }
 
-let body_of_file ?(trim = false) path =
-  let content = UFile.Legacy.read_file path in
+let body_of_file ?(trim = false) (path : Fpath.t) =
+  let content = UFile.read_file path in
   let content = if trim then String.trim content else content in
   Cohttp_lwt.Body.of_string content
 
@@ -315,10 +325,10 @@ let parse_resp =
           in
           let headers = parse_headers headers in
           let body = String.concat "\n" body |> Body.of_string in
-          (Cohttp.Response.make ~version ~status ~flush:true ~headers (), body))
+          (Cohttp.Response.make ~version ~status ~headers (), body))
 
-let client_from_file req_resp_file =
-  let contents = UFile.Legacy.read_file req_resp_file in
+let client_from_file (req_resp_file : Fpath.t) =
+  let contents = UFile.read_file req_resp_file in
   let rec go s acc =
     if String.length s = 0 then acc
     else if not (List.mem (String.get s 0) [ '>'; '<' ]) then

@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import Any
 from typing import Dict
 
 import pytest
@@ -235,12 +236,24 @@ pytestmark = pytest.mark.kinda_slow
             "dependency_aware/dart",
         ),
         (
+            "rules/dependency_aware/js-sca.yaml",
+            "dependency_aware/npm-empty",
+        ),
+        (
+            "rules/dependency_aware/js-sca.yaml",
+            "dependency_aware/npm-malformed",
+        ),
+        (
             "rules/dependency_aware/swift-sca.yaml",
             "dependency_aware/swiftpm/v1",
         ),
         (
             "rules/dependency_aware/swift-sca.yaml",
             "dependency_aware/swiftpm/v2",
+        ),
+        (
+            "rules/dependency_aware/swift-sca.yaml",
+            "dependency_aware/swiftpm/v3",
         ),
         (
             "rules/dependency_aware/swift-sca.yaml",
@@ -341,12 +354,51 @@ def test_ssc(run_semgrep_on_copied_files: RunSemgrep, snapshot, rule, target):
 )
 @pytest.mark.osemfail
 def test_ssc__requirements_lockfiles(
-    run_semgrep_on_copied_files: RunSemgrep, snapshot, rule, target
+    run_semgrep_on_copied_files: RunSemgrep, snapshot, rule: str, target: str
 ):
     """
     Separated out from test_ssc to avoid polluting with extra requirements lockfile tests
     """
     result = run_semgrep_on_copied_files(rule, target_name=target)
+
+    snapshot.assert_match(
+        result.as_snapshot(),
+        "results.txt",
+    )
+
+
+@pytest.mark.parametrize(
+    "rule,target",
+    [
+        (
+            "rules/dependency_aware/java-gradle-sca.yaml",
+            "dependency_aware/gradle-no-lockfile",
+        ),
+        (
+            "rules/dependency_aware/java-gradle-sca.yaml",
+            "dependency_aware/gradle-no-lockfile-missing-gradlew",
+        ),
+        (
+            "rules/dependency_aware/maven-log4j.yaml",
+            "dependency_aware/maven-no-lockfile",
+        ),
+        # also include some where lockfiles are present to check that we don't break those
+        (
+            "rules/dependency_aware/java-gradle-sca.yaml",
+            "dependency_aware/gradle",
+        ),
+    ],
+)
+@pytest.mark.requires_lockfileless_deps
+def test_ssc__lockfileless(
+    run_semgrep_on_copied_files: RunSemgrep, snapshot: Any, rule: str, target: str
+):
+    """
+    Run end-to-end SSC tests with lockfileless resolution enabled.
+    """
+    result = run_semgrep_on_copied_files(
+        rule, target_name=target, options=["--allow-local-builds"]
+    )
 
     snapshot.assert_match(
         result.as_snapshot(),
@@ -511,15 +563,29 @@ def test_parsing(caplog, target: str, snapshot, lockfile_path_in_tmp):
     parser: SemgrepParser = LOCKFILE_NAME_TO_PARSER[target_path.name]
     dependencies, error = parser(Path(target), None)  # no manifest for any of these
 
+    # The purpose of these tests is to ensure that parsers can handle a variety of lockfiles. As such,
+    # they may contain invalid dependency graphs which can result in DependencyParserErrors. Since these
+    # are out of scope for the parser tests, we ignore them here.
+    error = [e for e in error if "Child dependency version not found" not in e.reason]
+
     # Assert
 
-    # These two files have some packages we cannot really make sense of, so we ignore them
+    # Some of these files either contain incomplete dependency graphs,
+    # or have some packages we cannot really make sense of, so we ignore them
     # We include our failures in the error output for informational purposes
+    # if target.endswith("osv_parsing/pnpm/commits/pnpm-lock.yaml"):
+    #     assert len(error) == 1
     if target.endswith("files/pnpm-lock.yaml"):
         assert len(error) == 1
     elif target.endswith("exotic/pnpm-lock.yaml"):
         assert len(error) == 5
+    # elif target.endswith("osv_parsing/pnpm/peer-dependencies-advanced/pnpm-lock.yaml"):
+    #     assert len(error) == 1
     elif target.endswith("pnpm-error-key/pnpm-lock.yaml"):
+        assert len(error) == 1
+    elif target.endswith("requirements/empty/requirements.txt"):
+        assert len(error) == 1
+    elif target.endswith("requirements/only-comments/requirements.txt"):
         assert len(error) == 1
     else:
         assert len(error) == 0

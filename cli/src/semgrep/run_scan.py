@@ -14,6 +14,7 @@
 import json
 import sys
 import time
+import traceback
 from io import StringIO
 from os import environ
 from pathlib import Path
@@ -54,7 +55,7 @@ from semgrep.dependency_aware_rule import dependencies_range_match_any
 from semgrep.dependency_aware_rule import parse_depends_on_yaml
 from semgrep.engine import EngineType
 from semgrep.error import DependencyResolutionError
-from semgrep.error import FilesNotFoundError
+from semgrep.error import InvalidScanningRootError
 from semgrep.error import MISSING_CONFIG_EXIT_CODE
 from semgrep.error import select_real_errors
 from semgrep.error import SemgrepError
@@ -247,8 +248,9 @@ def run_rules(
     *,
     with_code_rules: bool = True,
     with_supply_chain: bool = False,
-    allow_dynamic_dependency_resolution: bool = False,
-    prioritize_dependency_graph_generation: bool = False,
+    allow_local_builds: bool = False,
+    ptt_enabled: bool = False,
+    resolve_all_deps_in_diff_scan: bool = False,
 ) -> Tuple[
     RuleMatchMap,
     List[SemgrepError],
@@ -256,6 +258,7 @@ def run_rules(
     Dict[str, List[FoundDependency]],
     List[DependencyParserError],
     List[Plan],
+    List[Union[UnresolvedSubproject, ResolvedSubproject]],
 ]:
     if not target_mode_config:
         target_mode_config = TargetModeConfig.whole_scan()
@@ -265,7 +268,9 @@ def run_rules(
     )
 
     # Get rules that rely on dependencies from the project's lockfile
-    dependency_aware_rules = [r for r in rest_of_the_rules if r.project_depends_on]
+    dependency_aware_rules: List[Rule] = [
+        r for r in rest_of_the_rules if r.project_depends_on
+    ]
 
     # Initialize data structures for dependencies
     filtered_dependency_aware_rules = []
@@ -274,6 +279,7 @@ def run_rules(
 
     resolved_subprojects: Dict[Ecosystem, List[ResolvedSubproject]] = {}
     unresolved_subprojects: List[UnresolvedSubproject] = []
+    all_subprojects: List[Union[ResolvedSubproject, UnresolvedSubproject]] = []
 
     if len(dependency_aware_rules) > 0:
         # Parse lockfiles to get dependency information, if there are relevant rules
@@ -283,12 +289,14 @@ def run_rules(
             sca_dependency_targets,
         ) = resolve_subprojects(
             target_manager,
-            allow_dynamic_resolution=allow_dynamic_dependency_resolution,
-            prioritize_dependency_graph_generation=prioritize_dependency_graph_generation,
+            dependency_aware_rules,
+            allow_dynamic_resolution=allow_local_builds,
+            ptt_enabled=ptt_enabled,
+            resolve_untargeted_subprojects=resolve_all_deps_in_diff_scan,
         )
+
         # for each subproject, split the errors into semgrep errors and parser errors.
         # output the semgrep errors and store the parser errors for printing in print_scan_status below
-        all_subprojects: List[Union[ResolvedSubproject, UnresolvedSubproject]] = []
         all_subprojects.extend(unresolved_subprojects)
         for subprojects in resolved_subprojects.values():
             all_subprojects.extend(subprojects)
@@ -355,8 +363,8 @@ def run_rules(
             join_rule_matches, join_rule_errors = join_rule.run_join_rule(
                 rule.raw,
                 [target.path for target in target_manager.targets],
-                allow_dynamic_dependency_resolution=allow_dynamic_dependency_resolution,
-                prioritize_dependency_graph_generation=prioritize_dependency_graph_generation,
+                allow_local_builds=allow_local_builds,
+                ptt_enabled=ptt_enabled,
             )
             join_rule_matches_set = RuleMatches(rule)
             for m in join_rule_matches:
@@ -448,6 +456,7 @@ def run_rules(
         deps_by_lockfile,
         dependency_parser_errors,
         plans,
+        all_subprojects,
     )
 
 
@@ -504,6 +513,7 @@ def run_scan(
     disable_nosem: bool = False,
     no_git_ignore: bool = False,
     respect_rule_paths: bool = True,
+    respect_semgrepignore: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
     max_memory: int = 0,
     interfile_timeout: int = 0,
@@ -521,10 +531,11 @@ def run_scan(
     x_ls_long: bool = False,
     path_sensitive: bool = False,
     capture_core_stderr: bool = True,
-    allow_dynamic_dependency_resolution: bool = False,
+    allow_local_builds: bool = False,
     dump_n_rule_partitions: Optional[int] = None,
     dump_rule_partitions_dir: Optional[Path] = None,
-    prioritize_dependency_graph_generation: bool = False,
+    ptt_enabled: bool = False,
+    resolve_all_deps_in_diff_scan: bool = False,
 ) -> Tuple[
     RuleMatchMap,
     List[SemgrepError],
@@ -538,6 +549,7 @@ def run_scan(
     List[DependencyParserError],
     int,  # Executed Rule Count
     int,  # Missed Rule Count
+    List[Union[UnresolvedSubproject, ResolvedSubproject]],
 ]:
     logger.debug(f"semgrep version {__VERSION__}")
 
@@ -691,9 +703,13 @@ def run_scan(
             baseline_handler = BaselineHandler(
                 baseline_commit, is_mergebase=baseline_commit_is_mergebase
             )
-        # TODO better handling
-        except Exception as e:
-            raise SemgrepError(e)
+        except Exception:
+            # Display a trace because we have no idea where the exception
+            # was raised.
+            exception_with_trace: str = traceback.format_exc()
+            raise SemgrepError(
+                f"Exception in BaselineHandler initialization: {exception_with_trace}"
+            )
 
     respect_git_ignore = not no_git_ignore
     target_strings = frozenset(Path(t) for t in target)
@@ -712,13 +728,14 @@ def run_scan(
             ignore_profiles=file_ignore_to_ignore_profiles(
                 get_file_ignore(too_many_entries)
             ),
+            respect_semgrepignore=respect_semgrepignore,
         )
         # Debugging option --x-ls
         if x_ls or x_ls_long:
             list_targets_and_exit(
                 target_manager, out.Product(out.SAST()), long_format=x_ls_long
             )
-    except FilesNotFoundError as e:
+    except InvalidScanningRootError as e:
         raise SemgrepError(e)
 
     if historical_secrets:
@@ -780,6 +797,7 @@ def run_scan(
         dependencies,
         dependency_parser_errors,
         plans,
+        all_subprojects,
     ) = run_rules(
         filtered_rules,
         target_manager,
@@ -795,8 +813,9 @@ def run_scan(
         target_mode_config,
         with_code_rules=with_code_rules,
         with_supply_chain=with_supply_chain,
-        allow_dynamic_dependency_resolution=allow_dynamic_dependency_resolution,
-        prioritize_dependency_graph_generation=prioritize_dependency_graph_generation,
+        allow_local_builds=allow_local_builds,
+        ptt_enabled=ptt_enabled,
+        resolve_all_deps_in_diff_scan=resolve_all_deps_in_diff_scan,
     )
     profiler.save("core_time", core_start_time)
     semgrep_errors: List[SemgrepError] = config_errors + scan_errors
@@ -873,6 +892,7 @@ def run_scan(
                         ignore_profiles=file_ignore_to_ignore_profiles(
                             get_file_ignore(too_many_entries),
                         ),
+                        respect_semgrepignore=respect_semgrepignore,
                     )
 
                     (
@@ -882,6 +902,7 @@ def run_scan(
                         _,
                         _,
                         _plans,
+                        _,
                     ) = run_rules(
                         # only the rules that had a match
                         [
@@ -900,8 +921,8 @@ def run_scan(
                         run_secrets,
                         disable_secrets_validation,
                         baseline_target_mode_config,
-                        allow_dynamic_dependency_resolution=allow_dynamic_dependency_resolution,
-                        prioritize_dependency_graph_generation=prioritize_dependency_graph_generation,
+                        allow_local_builds=allow_local_builds,
+                        ptt_enabled=ptt_enabled,
                     )
                     rule_matches_by_rule = remove_matches_in_baseline(
                         rule_matches_by_rule,
@@ -962,6 +983,7 @@ def run_scan(
         dependency_parser_errors,
         executed_rule_count,
         missed_rule_count,
+        all_subprojects,
     )
 
 
@@ -999,6 +1021,7 @@ def run_scan_and_return_json(
         _,
         _,
         _,
+        _all_subprojects,
     ) = run_scan(
         output_handler=output_handler,
         target=[str(t) for t in targets],

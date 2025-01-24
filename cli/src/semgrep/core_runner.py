@@ -719,7 +719,8 @@ class CoreRunner:
 
         Returns this information as a list of rule ids and a list of targets with
         language + index of the rule ids for the rules to run each target on.
-        Semgrep-core will use this to determine what to run (see Input_to_core.atd).
+        Semgrep-core will use this to determine what to run
+        (see semgrep_output_v1.atd and the target types).
         Also updates all_targets if set, used by core_runner
 
         Note: this is a list because a target can appear twice (e.g. Java + Generic)
@@ -903,7 +904,7 @@ Could not find the semgrep-core executable. Your Semgrep install is likely corru
                 cmd.extend(["-historical", "-only_validated"])
             else:
                 parsing_data.add_targets(plan)
-                target_file_contents = json.dumps(plan.to_json())
+                target_file_contents = plan.to_targets().to_json_string()
                 target_file.write(target_file_contents)
                 target_file.flush()
                 cmd.extend(["-targets", target_file.name])

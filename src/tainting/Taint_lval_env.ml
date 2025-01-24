@@ -12,11 +12,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-
-(* TODO: This needs some clean up, maybe we shouldn't expect clients of this module
- * to ensure that lvals satisfy IL_helpers.lval_is_var_and_dots, but rather handle
- * that internally. *)
-
 open Common
 module Log = Log_tainting.Log
 module T = Taint
@@ -29,6 +24,19 @@ open Shape_and_sig.Shape
 module Shape = Taint_shape
 
 let limits_tags = Logs_.create_tags [ "bad"; "limits" ]
+
+(*****************************************************************************)
+(* Prelude *)
+(*****************************************************************************)
+
+(* TODO: This needs some clean up, maybe we shouldn't expect clients of this
+ * module to ensure that lvals satisfy IL_helpers.lval_is_var_and_dots, but
+ * rather handle that internally.
+ *)
+
+(*****************************************************************************)
+(* Types *)
+(*****************************************************************************)
 
 type taints_to_propagate = T.taints VarMap.t
 type pending_propagation_dests = IL.lval VarMap.t
@@ -71,8 +79,8 @@ let hook_propagate_to :
     add:add_fn ->
     t)
     option
-    ref =
-  ref None
+    Hook.t =
+  Hook.create None
 
 let empty =
   {
@@ -83,6 +91,10 @@ let empty =
   }
 
 let empty_inout = { Dataflow_core.in_env = empty; out_env = empty }
+
+(*****************************************************************************)
+(* API *)
+(*****************************************************************************)
 
 let union le1 le2 =
   let tainted =
@@ -105,19 +117,6 @@ let union le1 le2 =
 
 let union_list ?(default = empty) les = List.fold_left union default les
 
-(* HACK: Because we don't have a "Class" type, classes have themselves as types. *)
-let is_class_name (name : IL.name) =
-  match (!(name.id_info.id_resolved), !(name.id_info.id_type)) with
-  | Some resolved1, Some { t = TyN (Id (_, { id_resolved; _ })); _ } -> (
-      match !id_resolved with
-      | None -> false
-      | Some resolved2 ->
-          (* If 'name' has type 'name' then we assume it's a class. *)
-          AST_generic.equal_resolved_name resolved1 resolved2)
-  | _, None
-  | _, Some _ ->
-      false
-
 (* Reduces an l-value into the form x.a_1. ... . a_N, the resulting l-value may
  * not represent the exact same object as the original l-value, but an
  * overapproximation. For example, the normalized l-value of `x[i]` will be `x`,
@@ -132,9 +131,14 @@ let normalize_lval lval =
         Some (x, rev_offset)
     | Var name -> (
         match rev_offset with
-        (* static class field, `C.x`, we normalize it to just `x` since `x` is
-         * a unique global *)
-        | [ { o = IL.Dot var; _ } ] when is_class_name name -> Some (var, [])
+        (* Static class field, `C.x`, we normalize it to just `x` since `x` is
+           a unique global.
+
+           TODO: C.x.y ? *)
+        | [ { o = IL.Dot var; _ } ]
+          when H.is_class_name name || IdFlags.is_static !(var.id_info.id_flags)
+          ->
+            Some (var, [])
         | __else__ -> Some (name, rev_offset))
     (* explicit dereference of `this` e.g. `this->x` *)
     | Mem { e = Fetch { base = VarSpecial (This, _); rev_offset = [] }; _ }
@@ -195,38 +199,49 @@ let check_tainted_lvals_limit tainted new_var =
         None)
   else Some tainted
 
-let add_shape lval new_taints new_shape
+let add_shape var offset new_taints new_shape
     ({ tainted; control; taints_to_propagate; pending_propagation_dests } as
      lval_env) =
+  match check_tainted_lvals_limit tainted var with
+  | None -> lval_env
+  | Some tainted ->
+      let new_taints, new_shape =
+        let var_tok = snd var.ident in
+        if Tok.is_fake var_tok then (new_taints, new_shape)
+        else
+          let new_taints =
+            new_taints
+            |> Taints.map (fun t ->
+                   { t with rev_tokens = var_tok :: t.rev_tokens })
+          in
+          let new_shape = Shape.add_tainted_token_to_shape var_tok new_shape in
+          (new_taints, new_shape)
+      in
+      {
+        tainted =
+          NameMap.update var
+            (fun opt_var_ref ->
+              Shape.update_offset_and_unify new_taints new_shape offset
+                opt_var_ref)
+            tainted;
+        control;
+        taints_to_propagate;
+        pending_propagation_dests;
+      }
+
+let add_lval_shape lval new_taints new_shape lval_env =
   match normalize_lval lval with
   | None ->
       (* Cannot track taint for this l-value; e.g. because the base is not a simple
          variable. We just return the same environment untouched. *)
       lval_env
-  | Some (var, offset) -> (
-      match check_tainted_lvals_limit tainted var with
-      | None -> lval_env
-      | Some tainted ->
-          let new_taints =
-            let var_tok = snd var.ident in
-            if Tok.is_fake var_tok then new_taints
-            else
-              new_taints
-              |> Taints.map (fun t -> { t with tokens = var_tok :: t.tokens })
-          in
-          {
-            tainted =
-              NameMap.update var
-                (fun opt_var_ref ->
-                  Shape.update_offset_and_unify new_taints new_shape offset
-                    opt_var_ref)
-                tainted;
-            control;
-            taints_to_propagate;
-            pending_propagation_dests;
-          })
+  | Some (var, offset) -> add_shape var offset new_taints new_shape lval_env
 
-let add lval new_taints lval_env = add_shape lval new_taints Bot lval_env
+let add var offset new_taints lval_env =
+  add_shape var offset new_taints Bot lval_env
+
+let add_lval lval new_taints lval_env =
+  add_lval_shape lval new_taints Bot lval_env
 
 let propagate_to prop_var taints env =
   (* THINK: Should we record empty propagations anyways so that we can always
@@ -240,21 +255,33 @@ let propagate_to prop_var taints env =
         taints_to_propagate = VarMap.add prop_var taints env.taints_to_propagate;
       }
     in
-    match !hook_propagate_to with
+    match Hook.get hook_propagate_to with
     | None -> env
     | Some hook ->
         hook prop_var taints ~taints_to_propagate:env.taints_to_propagate
           ~pending_propagation_dests:env.pending_propagation_dests
           ~prop:(fun ~taints_to_propagate ~pending_propagation_dests ->
             { env with taints_to_propagate; pending_propagation_dests })
-          ~add
+          ~add:add_lval
 
 let find_var { tainted; _ } var = NameMap.find_opt var tainted
 
 let find_lval { tainted; _ } lval =
   let* var, offsets = normalize_lval lval in
   let* var_ref = NameMap.find_opt var tainted in
-  Shape.find_in_cell offsets var_ref
+  match Shape.find_in_cell offsets var_ref with
+  | `Clean
+  | `Not_found _ ->
+      None
+  | `Found cell -> Some cell
+
+let find_poly { tainted; _ } var offsets =
+  let* var_ref = NameMap.find_opt var tainted in
+  Shape.find_in_cell_poly offsets var_ref
+
+let find_lval_poly lval_env lval =
+  let* var, offsets = normalize_lval lval in
+  find_poly lval_env var offsets
 
 let find_lval_xtaint env lval =
   match find_lval env lval with
@@ -301,6 +328,10 @@ let clean
         pending_propagation_dests;
         (* THINK: Should we clean propagations before they are executed? *)
       }
+
+let filter_tainted pred ({ tainted; _ } as lval_env) =
+  let tainted = tainted |> NameMap.filter (fun var _cell -> pred var) in
+  { lval_env with tainted }
 
 let add_control_taints lval_env taints =
   if Taints.is_empty taints then lval_env

@@ -265,10 +265,10 @@ local opam_switch = '4.14.0';
 // locally in the project folder (/home/runner/work/semgrep/semgrep/_opam)
 // coupling: default is above opam_switch
 local opam_setup = function(opam_switch="4.14.0") {
-      uses: 'ocaml/setup-ocaml@v2',
+      uses: 'ocaml/setup-ocaml@v3',
       with: {
         'ocaml-compiler': opam_switch,
-        'opam-depext': false,
+	'opam-pin': false,
       },
     };
 
@@ -316,6 +316,38 @@ local osemgrep_test_steps_after_checkout = [
   },
 ];
 
+local setup_nix_step = [
+  {
+    name: "Set up Nix",
+    uses: "DeterminateSystems/nix-installer-action@main",
+    with: {
+      // need to pin until
+      // https://github.com/DeterminateSystems/nix-installer-action/issues/133
+      // is fixed
+      "source-tag": "v0.32.3",
+        // pysemgrep and osemgrep have networking tests that rely on the
+        // actual internet (i.e. semgrep.dev). When sandbox=false nix builds
+        // everything fine, but all networking tests fail. So we set sandbox
+        // to false here so networking tests succeed
+        //
+        // TODO: disable networking tests for nix? that would be the nix way
+        // of doing things
+
+        // extra substituters and public keys use https://app.cachix.org/cache/semgrep
+        // to cache the build dependencies!
+        "extra-conf": "sandbox = false",
+    },
+  },
+  // This will automatically install cachix and upload to cachix
+  {
+      name: "Install Cachix",
+      uses: "cachix/cachix-action@v14",
+      with: {
+          name: "semgrep",
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}",
+      },
+  }
+];
 
 // ----------------------------------------------------------------------------
 // Entry point
@@ -344,6 +376,10 @@ local osemgrep_test_steps_after_checkout = [
   depot_project_id: 'fhmxj6w9z8',
   opam_switch: opam_switch,
   opam_setup: opam_setup,
+  // coupling: cli/setup.py, the matrix in run-cli-tests.libsonnet,
+  // build-test-manylinux-x86.jsonnet in pro, tests.jsonnet in OSS
+  // TODO? could switch to higher like 3.11
+  default_python_version: '3.9',
   containers: containers,
 
   github_bot: github_bot,
@@ -354,4 +390,5 @@ local osemgrep_test_steps_after_checkout = [
 
   // Reusable sequences of test steps
   osemgrep_test_steps_after_checkout: osemgrep_test_steps_after_checkout,
+  setup_nix_step: setup_nix_step,
 }

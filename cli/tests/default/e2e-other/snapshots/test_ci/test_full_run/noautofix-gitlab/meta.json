@@ -1,6 +1,5 @@
 {
-  "meta": {
-    "semgrep_version": "<sanitized version>",
+  "project_metadata": {
     "scan_environment": "gitlab-ci",
     "repository": "project_name/project_name",
     "repo_url": "https://example.com/gitlab-org/gitlab-foss",
@@ -24,7 +23,15 @@
     "start_sha": "unused-commit-test-placeholder",
     "is_sca_scan": false,
     "is_code_scan": false,
-    "is_secrets_scan": false,
+    "is_secrets_scan": false
+  },
+  "scan_metadata": {
+    "cli_version": "<sanitized version>",
+    "unique_id": "<sanitized id>",
+    "requested_products": [],
+    "dry_run": false
+  },
+  "project_config": {
     "version": "v1"
   }
 }

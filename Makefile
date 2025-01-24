@@ -269,8 +269,18 @@ install-deps-for-semgrep-core:
 # of installing all the packages in one shot and detecting possible
 # version conflicts.
 # OPAMSOLVERTIMEOUT default is 60 but seems not enough
+#
+# TODO: We use `--assume-depexts` because as of 2024-11-13 brew
+# has moved off `pkg-config`. When you install `pkg-config` you
+# get `pkgconf` instead, which OCaml doesn't recognize as satisfying
+# the dependency though it contains the same elements. This has been
+# reported to brew via https://github.com/ocaml/opam-repository/issues/26876.
+# We can remove it if that issue is resolved.
+# Per the note above install-deps-ALPINE-for-semgrep-core, we may want
+# to keep it and add `--no-cache`
 install-opam-deps:
-	OPAMSOLVERTIMEOUT=1200 opam install -y --deps-only $(REQUIRED_DEPS)
+	opam update -y
+	OPAMSOLVERTIMEOUT=1200 opam install -y --assume-depexts --deps-only $(REQUIRED_DEPS)
 
 # This will fail if semgrep.opam isn't up-to-date (in git),
 # and dune isn't installed yet. You can always install dune with
@@ -407,7 +417,11 @@ install-deps-UBUNTU-for-semgrep-core:
 # external packages to force static-linking
 install-deps-MACOS-for-semgrep-core:
 	brew install $(BREW_DEPS)
-
+	# We do this so we build LWT with libev on the path
+	# Coupling: This should be similar to homebrew setup
+	# austin: Why can't we use make homebrew-setup here? It doesn't seem to work
+	# because of something with how tree-sitter is installed.
+	LIBRARY_PATH="$$(brew --prefix)/lib" $(MAKE) install-deps-for-semgrep-core
 # Install dependencies needed for the Homebrew build.
 #
 # We don't use just 'make install-deps-for-semgrep-core' because Homebrew
@@ -438,6 +452,9 @@ homebrew-setup:
 # -------------------------------------------------
 # See flake.nix top level comments for more information
 
+# always accept the semgrep cache substituer
+NIX=nix --accept-flake-config
+
 # Enter development environment with all dependencies installed
 #
 # The finger stuff here is weird but it's so we can get the user shell and run
@@ -446,35 +463,31 @@ homebrew-setup:
 # only way to get it
 shell:
 	$(eval USER_SHELL := $(shell finger ${USER} | grep 'Shell:*' | cut -f3 -d ":"))
-	nix develop -c $(USER_SHELL)
+	$(NIX) develop -c $(USER_SHELL)
+
+# exclude all non-nix environment variables, good for debugging
+shell-pure:
+	$(NIX) develop -i
 
 # Build targets
 # For all the .?submodules=1 we need because nix is weird:
 # https://github.com/NixOS/nix/issues/4423#issuecomment-791352686
 nix-osemgrep:
-	nix build ".?submodules=1#osemgrep"
+	$(NIX) build ".?submodules=1#osemgrep"
 
 nix-semgrep-core:
-	nix build ".?submodules=1#semgrep-core"
+	$(NIX) build ".?submodules=1#semgrep-core"
 
 nix-semgrep:
-	nix build ".?submodules=1#semgrep"
+	$(NIX) build ".?submodules=1#semgrep"
 
 # Build + run tests (doesn't run python tests yet)
 nix-check:
-	nix flake check ".?submodules=1#"
+	$(NIX) flake check ".?submodules=1#"
 
 # verbose and sandboxing are disabled to enable networking for tests
 nix-check-verbose:
-	nix flake check -L ".?submodules=1#"
-
-# check flake is valid and not stale
-nix-check-flake:
-	nix run github:DeterminateSystems/flake-checker
-
-# Update flake inputs
-nix-update:
-	nix flake update
+	$(NIX) flake check -L ".?submodules=1#"
 
 # -------------------------------------------------
 # Windows (native, via mingw and cygwin)
@@ -623,7 +636,7 @@ DOCKER_IMAGE=semgrep/semgrep:develop
 
 # If you get parsing errors while running this command, maybe you have an old
 # cached version of the docker image. You can invalidate the cache with
-#   'docker rmi returntocorp/semgrep:develop`
+#   'docker rmi semgrep/semgrep:develop`
 check_with_docker:
 	docker run --rm -v "${PWD}:/src" $(DOCKER_IMAGE) semgrep $(SEMGREP_ARGS)
 

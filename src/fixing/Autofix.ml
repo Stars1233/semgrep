@@ -124,16 +124,16 @@ let parse_target lang text =
 let transform_fix lang ast =
   match lang with
   | Lang.Python ->
-      (* Due to unordered keyword argument matching (see
-       * Generic_vs_generic.m_list__m_argument), we can end up generating
-       * autofixes where keyword arguments are moved before positional
-       * arguments. In some languages (OCaml, for example) this doesn't change
-       * the semantics, but in Python this is actually syntactically invalid.
-       * So, to avoid generating invalid autofixes, we move the positional
-       * arguments in front of the keyword arguments.
-       *
-       * See the fix_ellipsis_metavar.py test case for an example of when this
-       * can happen. *)
+      (* Due to unordered keyword argument matching (see m_list__m_argument),
+         * we can end up generating
+         * autofixes where keyword arguments are moved before positional
+         * arguments. In some languages (OCaml, for example) this doesn't change
+         * the semantics, but in Python this is actually syntactically invalid.
+         * So, to avoid generating invalid autofixes, we move the positional
+         * arguments in front of the keyword arguments.
+         *
+         * See the fix_ellipsis_metavar.py test case for an example of when this
+         * can happen. *)
       let mapper =
         object (_self : 'self)
           inherit [_] AST_generic.map as super
@@ -201,8 +201,7 @@ let validate_fix lang target_contents edit =
  * - Printing of the resulting fix AST fails (probably because there is simply a
  *   node that is unhandled).
  * *)
-let ast_based_fix ~fix (start, end_) (pm : Pattern_match.t) : Textedit.t option
-    =
+let ast_based_fix ~fix (start, end_) (pm : Core_match.t) : Textedit.t option =
   let fix_pattern = fix in
   let* lang = List.nth_opt pm.rule_id.langs 0 in
   let metavars = pm.env in
@@ -288,8 +287,7 @@ let ast_based_fix ~fix (start, end_) (pm : Pattern_match.t) : Textedit.t option
       |> List.iter (fun s -> Log.warn (fun m -> m "%s" s));
       None
 
-let basic_fix ~(fix : string) (start, end_) (pm : Pattern_match.t) : Textedit.t
-    =
+let basic_fix ~(fix : string) (start, end_) (pm : Core_match.t) : Textedit.t =
   let start_column = (fst pm.range_loc).pos.column in
   (* TODO: Use m.env instead *)
   let replacement_text =
@@ -304,7 +302,7 @@ let basic_fix ~(fix : string) (start, end_) (pm : Pattern_match.t) : Textedit.t
   edit
 
 let regex_fix ~fix_regexp:Rule.{ regexp; count; replacement } (start, end_)
-    (pm : Pattern_match.t) =
+    (pm : Core_match.t) =
   let rex = Pcre2_.regexp regexp in
   (* You need a minus one, to make it compatible with the inclusive Range.t *)
   let content =
@@ -356,7 +354,7 @@ let regex_fix ~fix_regexp:Rule.{ regexp; count; replacement } (start, end_)
 (* Autofix selection logic *)
 (*****************************************************************************)
 
-let render_fix (pm : Pattern_match.t) : Textedit.t option =
+let render_fix (pm : Core_match.t) : Textedit.t option =
   let fix =
     (* We prefer the fix that is global to the entire rule if it exists.
        Otherwise, we'll take the fix_text that we populated the pattern
@@ -369,7 +367,7 @@ let render_fix (pm : Pattern_match.t) : Textedit.t option =
   in
   let fix_regex = pm.rule_id.fix_regexp in
   let range =
-    let start, end_ = pm.Pattern_match.range_loc in
+    let start, end_ = pm.range_loc in
     let _, _, end_charpos = Tok.end_pos_of_loc end_ in
     (start.Tok.pos.bytepos, end_charpos)
   in
@@ -385,11 +383,12 @@ let render_fix (pm : Pattern_match.t) : Textedit.t option =
 (* Entry points *)
 (*****************************************************************************)
 
+let produce_autofix (m : Core_result.processed_match) =
+  { m with autofix_edit = render_fix m.pm }
+
 let produce_autofixes (matches : Core_result.processed_match list) =
-  List_.map
-    (fun (m : Core_result.processed_match) ->
-      { m with autofix_edit = render_fix m.pm })
-    matches
+  (* TODO Simple function, inline at callsites? *)
+  List_.map produce_autofix matches
 
 (* This is used for testing only. This is why it raises an exception. *)
 let apply_fixes_to_file_exn path edits =

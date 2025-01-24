@@ -11,21 +11,7 @@ local wheel_name = 'osx-arm64-wheel';
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
-local runs_on = [
-  'self-hosted',
-  'macOS',
-  'ARM64',
-  'ghcr.io/cirruslabs/macos-monterey-xcode:latest',
-];
-
-local setup_runner_step = {
-  name: 'Setup runner directory',
-  run: |||
-    sudo mkdir -p /Users/runner
-    sudo chown admin:staff /Users/runner
-    sudo chmod 750 /Users/runner
-  |||,
-};
+local runs_on = 'macos-latest';
 
 // Our self-hosted runner do not come with python pre-installed.
 //
@@ -51,7 +37,6 @@ local artifact_name = 'semgrep-osx-arm64-${{ github.sha }}';
 local build_core_job = {
   'runs-on': runs_on,
   steps: [
-    setup_runner_step,
     setup_python_step,
     actions.checkout_with_submodules(),
     // TODO: like for osx-x86, we should use opam.lock
@@ -59,9 +44,12 @@ local build_core_job = {
        key=semgrep.opam_switch + "-${{hashFiles('semgrep.opam')}}")
      + semgrep.cache_opam.if_cache_inputs,
     // exactly the same than in build-test-oxs-x86.jsonnet
+    semgrep.opam_setup(),
     {
       name: 'Install dependencies',
-      run: './scripts/osx-setup-for-release.sh "%s"' % semgrep.opam_switch,
+      run: |||
+        make install-deps-MACOS-for-semgrep-core
+      |||,
     },
     {
       name: 'Compile semgrep',
@@ -82,7 +70,6 @@ local build_wheels_job = {
     'build-core',
   ],
   steps: [
-    setup_runner_step,
     setup_python_step,
     // needed for ./script/build-wheels.sh below
     actions.checkout_with_submodules(),
@@ -96,7 +83,7 @@ local build_wheels_job = {
       |||,
     },
     {
-      uses: 'actions/upload-artifact@v3',
+      uses: 'actions/upload-artifact@v4',
       with: {
         path: 'cli/dist.zip',
         name: wheel_name,
@@ -111,7 +98,6 @@ local test_wheels_job = {
     'build-wheels',
   ],
   steps: [
-    setup_runner_step,
     setup_python_step,
     actions.download_artifact_step(wheel_name),
     {

@@ -16,7 +16,7 @@ from semdep.parsers.util import json_doc
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Composer
-from semgrep.semgrep_interfaces.semgrep_output_v1 import ComposerLock
+from semgrep.semgrep_interfaces.semgrep_output_v1 import ComposerLock_
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
@@ -48,8 +48,8 @@ def parse_composer_lock(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(lockfile_path, json_doc, ScaParserName(ComposerLock())),
-        DependencyFileToParse(manifest_path, json_doc, ScaParserName(ComposerLock()))
+        DependencyFileToParse(lockfile_path, json_doc, ScaParserName(ComposerLock_())),
+        DependencyFileToParse(manifest_path, json_doc, ScaParserName(ComposerLock_()))
         if manifest_path
         else None,
     )
@@ -119,6 +119,7 @@ def parse_composer_lock(
                 transitivity=transitivity(manifest_deps, [package]),
                 line_number=line_number,
                 lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
     # Return the output list containing FoundDependency objects

@@ -1,13 +1,13 @@
 (* main entry point *)
 val check_rule :
+  matches_hook:(Core_match.t list -> Core_match.t list) ->
   Rule.search_rule ->
-  (Pattern_match.t list -> Pattern_match.t list) ->
   Match_env.xconfig ->
   Xtarget.t ->
   Core_profiling.rule_profiling Core_result.match_result
 
 val hook_pro_entropy_analysis :
-  (mode:Rule.entropy_analysis_mode -> string -> bool) option ref
+  (mode:Rule.entropy_analysis_mode -> string -> bool) option Hook.t
 
 val hook_pro_metavariable_name :
   (AST_generic.expr -> Rule.metavar_cond_name -> bool) option ref

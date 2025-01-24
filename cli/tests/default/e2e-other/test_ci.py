@@ -32,8 +32,6 @@ from tests.default.e2e.test_baseline import _git_merge
 from tests.fixtures import RunSemgrep
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
-from semgrep import __VERSION__
-from semgrep.app.scans import ScanCompleteResult
 from semgrep.app.scans import ScanHandler
 from semgrep.constants import OutputFormat
 from semgrep.engine import EngineType
@@ -153,6 +151,35 @@ DEFAULT_GITHUB_VARS = {
 ##############################################################################
 # Fixtures
 ##############################################################################
+
+
+@pytest.fixture
+def git_path_empty_repo(monkeypatch, tmp_path):
+    """
+    Initialize a git repo with no commits
+    """
+    repo_base = tmp_path / REPO_DIR_NAME
+    repo_base.mkdir()
+
+    monkeypatch.chdir(repo_base)
+    subprocess.run(["git", "init"], check=True, capture_output=True)
+    # Initialize State
+    subprocess.run(
+        ["git", "config", "user.email", AUTHOR_EMAIL],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", AUTHOR_NAME],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-B", MAIN_BRANCH_NAME],
+        check=True,
+        capture_output=True,
+    )
+    yield repo_base
 
 
 @pytest.fixture
@@ -509,14 +536,18 @@ def upload_results_mock_maker(requests_mock, mocked_scan_id, mocked_task_id):
 
 
 @pytest.fixture
-def complete_scan_mock_maker(requests_mock, mocked_scan_id):
+def mocked_complete_response():
+    return out.CiScanCompleteResponse(
+        success=True, app_block_override=True, app_block_reason="Test Reason"
+    )
+
+
+@pytest.fixture
+def complete_scan_mock_maker(requests_mock, mocked_scan_id, mocked_complete_response):
     def _complete_scan_func(semgrep_url: str = "https://semgrep.dev"):
-        complete_response = out.CiScanCompleteResponse(
-            success=True, app_block_override=True, app_block_reason="Test Reason"
-        )
         return requests_mock.post(
             f"{semgrep_url}/api/agent/scans/{mocked_scan_id}/complete",
-            json=complete_response.to_json(),
+            json=mocked_complete_response.to_json(),
         )
 
     return _complete_scan_func
@@ -972,19 +1003,20 @@ def test_full_run(
 
     # Check correct metadata
     scan_create_json = start_scan_mock.last_request.json()
-    meta_json = scan_create_json["meta"]
+    prj_meta_json = scan_create_json["project_metadata"]
+    scan_meta_json = scan_create_json["scan_metadata"]
 
     if "SEMGREP_COMMIT" in env:
-        assert meta_json["commit"] == env["SEMGREP_COMMIT"]
-        meta_json["commit"] = "sanitized semgrep commit"
+        assert prj_meta_json["commit"] == env["SEMGREP_COMMIT"]
+        prj_meta_json["commit"] = "sanitized semgrep commit"
     else:
-        assert meta_json["commit"] == head_commit
-        meta_json["commit"] = "sanitized"
+        assert prj_meta_json["commit"] == head_commit
+        prj_meta_json["commit"] = "sanitized"
 
-    assert meta_json["semgrep_version"] == __VERSION__
-    meta_json["semgrep_version"] = "<sanitized version>"
+    scan_meta_json["cli_version"] = "<sanitized version>"
+    scan_meta_json["unique_id"] = "<sanitized id>"
 
-    assert meta_json["commit_timestamp"] == FROZEN_ISOTIMESTAMP.value
+    assert prj_meta_json["commit_timestamp"] == FROZEN_ISOTIMESTAMP.value
 
     if env.get("GITLAB_CI"):
         # If in a merge pipeline, base_sha is defined, otherwise is None
@@ -992,13 +1024,9 @@ def test_full_run(
             base_commit if env.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") else None
         )
         if gitlab_base_sha != None:
-            assert meta_json["base_sha"] == gitlab_base_sha
-            meta_json["base_sha"] = "sanitized"
+            assert prj_meta_json["base_sha"] == gitlab_base_sha
+            prj_meta_json["base_sha"] = "sanitized"
 
-    # TODO: we should add those in the snapshots at some point
-    del scan_create_json["project_metadata"]
-    del scan_create_json["project_config"]
-    del scan_create_json["scan_metadata"]
     snapshot.assert_match(json.dumps(scan_create_json, indent=2), "meta.json")
 
     findings_and_ignores_json = upload_results_mock.last_request.json()
@@ -1484,6 +1512,33 @@ def test_config_run(
     )
 
 
+# Testing semgrep ci on an empty repo, where the expected behavior
+# is that the run succeeds
+@pytest.mark.osemfail
+def test_empty_repo_run(
+    run_semgrep: RunSemgrep,
+    start_scan_mock_maker,
+    git_path_empty_repo,
+    requests_mock,
+    scan_config,
+):
+    requests_mock.get("https://semgrep.dev/p/something", text=scan_config)
+    # Here we only test that the run exits with an exit code of 0
+    # i.e the cli succeeding
+    run_semgrep(
+        "p/something",
+        subcommand="ci",
+        options=["--no-suppress-errors"],
+        strict=False,
+        assert_exit_code=0,  # This run must succeed
+        env={
+            "SEMGREP_APP_TOKEN": "",
+            "SEMGREP_REPO_URL": REMOTE_REPO_URL,
+        },
+        use_click_runner=True,
+    )
+
+
 @pytest.mark.kinda_slow
 @pytest.mark.parametrize(
     "format",
@@ -1660,6 +1715,27 @@ def test_generic_secrets_output(
     # the rule message doesn't show. these go straight to the App with minimal
     # CLI output
     assert "generic secrets rule message" not in result.raw_stdout
+
+
+@pytest.mark.osemfail
+def test_semgrep_managed_scan_id(run_semgrep: RunSemgrep, requests_mock):
+    MANAGED_SCAN_ID = "12321"
+    scan_create = requests_mock.post("https://semgrep.dev/api/cli/scans")
+    run_semgrep(
+        subcommand="ci",
+        options=["--no-suppress-errors", "--oss-only"],
+        target_name=None,
+        strict=False,
+        assert_exit_code=None,
+        env={
+            "SEMGREP_APP_TOKEN": "fake-key-from-tests",
+            "SEMGREP_MANAGED_SCAN_ID": MANAGED_SCAN_ID,
+        },
+        use_click_runner=True,  # TODO: probably because rely on some mocking
+    )
+    assert scan_create.call_count == 1
+    request_body = scan_create.request_history[-1].json()
+    assert request_body["scan_metadata"]["sms_scan_id"] == MANAGED_SCAN_ID
 
 
 @pytest.mark.parametrize("mocked_scan_id", [None])
@@ -2003,7 +2079,7 @@ def test_backend_exit_code(
     mocker.patch.object(
         ScanHandler,
         "report_findings",
-        return_value=ScanCompleteResult(True, True, "some reason to fail"),
+        return_value=out.CiScanCompleteResponse(True, True, "some reason to fail"),
     )
 
     start_scan_mock = start_scan_mock_maker("https://semgrep.dev")
@@ -2867,4 +2943,66 @@ def test_always_suppress_errors(
         assert_exit_code=0 if always_suppress_errors else 2,
         env={"SEMGREP_APP_TOKEN": "fake_key"},
         use_click_runner=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "mocked_complete_response",
+    [
+        # Should produce output showing all findings as blocking
+        out.CiScanCompleteResponse(
+            success=True,
+            app_block_override=True,
+            app_block_reason="",
+            app_blocking_match_based_ids=[
+                out.MatchBasedId(
+                    "186b96f64aca90b7f5a9c75f2e44538885d0e727ed3161ef7b6d46c40b3d078acfc8859b290e118cb8ca42f5b41e61afe73b0f416f47a2f16abce67b1be307d3_0"
+                ),
+                out.MatchBasedId(
+                    "2c4ff12fcdf80ef1c00dd0f566ae102d792c7ba68e560d70f111aae3b3216c0b1b943e74d2ce29c0361f1fbc37bd4e9aafd32c3435a36c61b8bd3963efe0d7a1_0"
+                ),
+            ],
+        ),
+        # Should produce output showing all findings as blocking, and also mention the 'Test reason'
+        out.CiScanCompleteResponse(
+            success=True,
+            app_block_override=True,
+            app_block_reason="Test reason",
+            app_blocking_match_based_ids=[
+                out.MatchBasedId(
+                    "186b96f64aca90b7f5a9c75f2e44538885d0e727ed3161ef7b6d46c40b3d078acfc8859b290e118cb8ca42f5b41e61afe73b0f416f47a2f16abce67b1be307d3_0"
+                ),
+                out.MatchBasedId(
+                    "2c4ff12fcdf80ef1c00dd0f566ae102d792c7ba68e560d70f111aae3b3216c0b1b943e74d2ce29c0361f1fbc37bd4e9aafd32c3435a36c61b8bd3963efe0d7a1_0"
+                ),
+            ],
+        ),
+    ],
+)
+@pytest.mark.osemfail
+def test_app_blocked_findings(
+    git_tmp_path_with_commit,
+    snapshot,
+    mocker,
+    run_semgrep: RunSemgrep,
+    start_scan_mock_maker,
+    complete_scan_mock_maker,
+    upload_results_mock_maker,
+):
+    start_scan_mock = start_scan_mock_maker("https://semgrep.dev")
+    complete_scan_mock = complete_scan_mock_maker("https://semgrep.dev")
+    upload_results_mock = upload_results_mock_maker("https://semgrep.dev")
+
+    result = run_semgrep(
+        subcommand="ci",
+        options=["--no-suppress-errors", "--oss-only"],
+        target_name=None,
+        strict=False,
+        assert_exit_code=None,
+        env={"SEMGREP_APP_TOKEN": "fake_key"},
+        use_click_runner=True,
+    )
+    snapshot.assert_match(
+        result.as_snapshot(),
+        "output.txt",
     )

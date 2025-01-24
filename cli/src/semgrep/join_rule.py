@@ -401,8 +401,8 @@ def json_to_rule_match(join_rule: Dict[str, Any], match: Dict[str, Any]) -> Rule
 def run_join_rule(
     join_rule: Dict[str, Any],
     targets: List[Path],
-    allow_dynamic_dependency_resolution: bool = False,
-    prioritize_dependency_graph_generation: bool = False,
+    allow_local_builds: bool = False,
+    ptt_enabled: bool = False,
 ) -> Tuple[List[RuleMatch], List[SemgrepError]]:
     """
     Run a 'join' mode rule.
@@ -493,8 +493,8 @@ def run_join_rule(
             targets=targets,
             no_rewrite_rule_ids=True,
             optimizations="all",
-            allow_dynamic_dependency_resolution=allow_dynamic_dependency_resolution,
-            prioritize_dependency_graph_generation=prioritize_dependency_graph_generation,
+            allow_local_builds=allow_local_builds,
+            ptt_enabled=ptt_enabled,
         )
 
     assert isinstance(output, dict)  # placate mypy

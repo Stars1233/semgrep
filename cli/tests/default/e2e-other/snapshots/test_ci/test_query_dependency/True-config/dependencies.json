@@ -12,7 +12,8 @@
       "transitivity": "unknown",
       "resolved_url": "https://registry.yarnpkg.com/lodash/-/lodash-4.17.18.tgz",
       "lockfile_path": "yarn.lock",
-      "line_number": 5
+      "line_number": 5,
+      "children": []
     }
   ],
   "poetry.lock": [
@@ -23,7 +24,8 @@
       "allowed_hashes": {},
       "transitivity": "unknown",
       "lockfile_path": "poetry.lock",
-      "line_number": 2
+      "line_number": 2,
+      "children": []
     },
     {
       "package": "mypy",
@@ -32,7 +34,8 @@
       "allowed_hashes": {},
       "transitivity": "unknown",
       "lockfile_path": "poetry.lock",
-      "line_number": 10
+      "line_number": 10,
+      "children": []
     },
     {
       "package": "python-dateutil",
@@ -41,7 +44,8 @@
       "allowed_hashes": {},
       "transitivity": "unknown",
       "lockfile_path": "poetry.lock",
-      "line_number": 18
+      "line_number": 18,
+      "children": []
     }
   ]
 }

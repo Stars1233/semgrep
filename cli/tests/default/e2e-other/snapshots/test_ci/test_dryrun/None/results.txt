@@ -1,7 +1,3 @@
-=== command
-SEMGREP_APP_TOKEN="fake-key-from-tests" SEMGREP_USER_AGENT_APPEND="pytest" SEMGREP_SETTINGS_FILE="<MASKED>" SEMGREP_VERSION_CACHE_PATH="<MASKED>" SEMGREP_ENABLE_VERSION_CHECK="0" SEMGREP_SEND_METRICS="off" semgrep ci --dry-run --no-suppress-errors --oss-only
-=== end of command
-
 === exit code
 1
 === end of exit code
@@ -92,16 +88,6 @@ SEMGREP_APP_TOKEN="fake-key-from-tests" SEMGREP_USER_AGENT_APPEND="pytest" SEMGR
 
   SUPPLY CHAIN RULES
   Scanning 1 file.
-
-
-┌──────────────┐
-│ Scan Summary │
-└──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files tracked by git.
-
-CI scan completed successfully.
-  Found 8 findings (6 blocking) from 7 rules.
 Would have sent findings and ignores blob: {
     "findings": [
         {
@@ -242,7 +228,8 @@ Would have sent findings and ignores blob: {
                         "allowed_hashes": {},
                         "transitivity": "unknown",
                         "lockfile_path": "poetry.lock",
-                        "line_number": 2
+                        "line_number": 2,
+                        "children": []
                     },
                     "lockfile": "poetry.lock"
                 }
@@ -768,10 +755,58 @@ Would have sent complete blob: {
         "findings_by_product": {
             "code": 16,
             "supply-chain": 1
+        },
+        "supply_chain_stats": {
+            "subprojects_stats": [
+                {
+                    "subproject_id": "51e4f558fae534656963876761c95b83b6ef5da5103c4adef6768219ed76c2de",
+                    "dependency_sources": [
+                        {
+                            "kind": [
+                                "Lockfile",
+                                "YarnLock"
+                            ],
+                            "path": "yarn.lock"
+                        }
+                    ],
+                    "resolved_stats": {
+                        "resolution_method": "LockfileParsing",
+                        "dependency_count": 1,
+                        "ecosystem": "npm"
+                    }
+                },
+                {
+                    "subproject_id": "f53a023eedfa3fbf2925ec7dc76eecdc954ea94b7e47065393dbad519613dc89",
+                    "dependency_sources": [
+                        {
+                            "kind": [
+                                "Lockfile",
+                                "PoetryLock"
+                            ],
+                            "path": "poetry.lock"
+                        }
+                    ],
+                    "resolved_stats": {
+                        "resolution_method": "LockfileParsing",
+                        "dependency_count": 3,
+                        "ecosystem": "pypi"
+                    }
+                }
+            ]
         }
     },
     "dependency_parser_errors": []
 }
+
+
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+Some files were skipped or only partially analyzed.
+  Scan was limited to files tracked by git.
+
+CI scan completed successfully.
+  Found 8 findings (6 blocking) from 7 rules.
   Has findings for blocking rules so exiting with code 1
 
 === end of stderr - plain

@@ -1,13 +1,14 @@
-(** Types for describing targets.
+(** Types for describing target files provided by pysemgrep.
 
-    See also {!Input_to_core_t}, which has a similar set of types used when
+    See also semgrep_output_v1.atd which has a similar set of types used when
     pysemgrep generates targets that have slightly less information (e.g.,
     these types have expanded information about the targets' locations). *)
 
 (*****************************************************************************)
-(* Types *)
+(* Target path *)
 (*****************************************************************************)
 
+(* Yet another path (Fpath.t -> Origin.t -> Target.path) *)
 type path = {
   origin : Origin.t;
       (** The origin of the data as is relevant to the user. This could be,
@@ -23,44 +24,24 @@ type path = {
           should be used to obtain the contents of the target, but not for
           reporting to the user, other than possibly for debugging purposes. *)
 }
-[@@deriving show, eq, yojson]
+[@@deriving show, eq]
 (** Information about where a target from for both the purpose of
    {ul
     {- informing the user: [origin]}
     {- obtaining the contents: [internal_path_to_content]}
   } *)
 
-type manifest = {
-  path : path;
-  kind : Manifest_kind.t;
-      (** The type of manifest this is. Analogous to analyzer for a source code
-        target. *)
-}
-[@@deriving show, yojson]
-(** A manifest file to be used during matching. See also
-    {!Lockfile_xtarget.manifest}, which also has the contents. *)
-
-type lockfile = {
-  path : path;
-  kind : Lockfile_kind.t;
-      (** The type of lockfile this is. Analogous to analyzer for a source code
-          target. *)
-  manifest : manifest option;
-      (** Optionally, a manifest file associated with this lockfile. *)
-}
-[@@deriving show, yojson]
-(** A lockfile to be used during matching. See also {!Lockfile_xtarget.t}, an
-    augmented version with the contents of the lockfile. *)
-
-val pp_debug_lockfile : Format.formatter -> lockfile -> unit
+(*****************************************************************************)
+(* Regular target *)
+(*****************************************************************************)
 
 type regular = {
   path : path;
-  analyzer : Xlang.t;  (** The analyzer to use when scanning this target. *)
-  products : Semgrep_output_v1_t.product list;
+  analyzer : Analyzer.t;  (** The analyzer to use when scanning this target. *)
+  products : Product.t list;
       (** The products which should scan this target. This is used for
           selecting the relevant set of rules. *)
-  lockfile : lockfile option;
+  lockfile : Lockfile.t option;
       (** Optional lockfile associated with this target.
 
           The association is namely that this target has its dependencies
@@ -69,12 +50,13 @@ type regular = {
           generation process must resolve these connections as part of
           generating regular targets. *)
 }
-[@@deriving show, yojson]
 (** A regular semgrep target, comprising source code (or, for
    regex/generic, arbitrary text data) to be executed. See also {!Xtarget.t},
    an augmented version which also has the contents. *)
 
-val pp_debug_regular : Format.formatter -> regular -> unit
+(*****************************************************************************)
+(* Main type *)
+(*****************************************************************************)
 
 (** A Semgrep target. This contains all of the details needed to be able to
     determine how to scan a target, e.g.,
@@ -88,20 +70,14 @@ val pp_debug_regular : Format.formatter -> regular -> unit
     However, it does not contain the actual contents (parsed or otherwise) of
     the target itself. For that, see {!Xtarget.t} or {!Lockfile_xtarget}.
  *)
-type t = Regular of regular | Lockfile of lockfile [@@deriving show, yojson]
-
-val pp_debug : Format.formatter -> t -> unit
+type t = Regular of regular | Lockfile of Lockfile.t [@@deriving show]
 
 (*****************************************************************************)
 (* Builders *)
 (*****************************************************************************)
 
 val mk_regular :
-  ?lockfile:lockfile ->
-  Xlang.t ->
-  Semgrep_output_v1_t.product list ->
-  Origin.t ->
-  regular
+  ?lockfile:Lockfile.t -> Analyzer.t -> Product.t list -> Origin.t -> regular
 (** [mk_regular analyzer products origin] is a {!regular} target
       originating from [origin] to be analyzed with [analyzer] for [products].
       If [lockfile] is specified then it shall be used as the associated
@@ -112,32 +88,13 @@ val mk_regular :
       a target from certain types of origins, such as generating a tempfile.
  *)
 
-val mk_lockfile : ?manifest:manifest -> Lockfile_kind.t -> Origin.t -> lockfile
-(** [mk_lockfile k origin] is the a {!lockfile} target
-      originating from [origin] of kind [k]. If [manifest] is specified, it
-      shall be used as the associated manifest.
-
-      This function should be generally preferred over creating a record
-      directly, since it can peform actions which may be required when creating
-      a target from certain types of origins, such as generating a tempfile.
- *)
-
-val mk_manifest : Manifest_kind.t -> Origin.t -> manifest
-(** [mk_manifest k origin] is a {!manifest} target
-    originating from [origin] of kind [k].
-
-    This function should be generally preferred over creating a record
-    directly, since it can peform actions which may be required when creating a
-    target from certain types of origins, such as generating a tempfile.
- *)
-
 (* useful in tests *)
-val mk_target : Xlang.t -> Fpath.t -> t
+val mk_target : Analyzer.t -> Fpath.t -> t
 
 (*****************************************************************************)
-(* Input_to_core -> Target *)
+(* Semgrep_output_v1.target -> Target.t *)
 (*****************************************************************************)
-val target_of_input_to_core : Input_to_core_t.target -> t
+val target_of_target : Semgrep_output_v1_t.target -> t
 
 (*****************************************************************************)
 (* Accessors *)
@@ -150,4 +107,32 @@ val internal_path : t -> Fpath.t
 val origin : t -> Origin.t
 (** [origin target] is the user-reportable origin of [target]. *)
 
-val analyzer : t -> Xlang.t option
+val analyzer : t -> Analyzer.t option
+
+(*
+   The set of all lang analyzers associated with targets.
+   This is used to filter out rules that don't apply to any of the targets
+   we receive from pysemgrep.
+   The analyzers are flattened i.e. each of them contains at most one Lang.t
+   (L (lang, []).
+*)
+val analyzers_of_targets : t list -> Analyzer.t Set_.t
+
+(*****************************************************************************)
+(* Dumpers *)
+(*****************************************************************************)
+
+val pp_debug : Format.formatter -> t -> unit
+
+(* used by Targeting_stats.ml for telemetry *)
+val to_yojson : t -> Yojson.Safe.t
+
+(* This is not implemented; we should not need it but we need a signature here
+ * to typecheck the deriving yojson in other files.
+ *)
+val of_yojson : Yojson.Safe.t -> (t, string) result
+
+(*****************************************************************************)
+(* Helpers used internally but also in other files *)
+(*****************************************************************************)
+val path_of_origin : Origin.t -> path

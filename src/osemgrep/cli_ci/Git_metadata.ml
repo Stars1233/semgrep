@@ -121,10 +121,15 @@ class meta (caps : < Cap.exec >) ~scan_environment
       let commit_title : string =
         Git_wrapper.command caps [ "show"; "-s"; "--format=%B" ]
       in
-      let commit_author_email : Emile.mailbox =
+      let commit_author_email_str : string =
         Git_wrapper.command caps [ "show"; "-s"; "--format=%ae" ]
-        |> Emile.of_string |> Result.get_ok
       in
+      (* old: |> Emile.of_string |> Result.get_ok
+       * but github generates emails like
+       * 106279034+semgrep-ci[bot]@users.noreply.github.com
+       * which are not valid for Emile so simpler to use
+       * the raw string as in pysemgrep
+       *)
       let commit_author_name : string =
         Git_wrapper.command caps [ "show"; "-s"; "--format=%an" ]
       in
@@ -134,16 +139,15 @@ class meta (caps : < Cap.exec >) ~scan_environment
         |> Timedesc.Timestamp.of_iso8601 |> Result.get_ok
       in
       {
-        semgrep_version = Version.version;
-        (* REQUIRED for semgrep backed *)
+        (* REQUIRED for semgrep backend *)
         repository = self#repo_name;
-        (* OPTIONAL for semgrep backed *)
+        (* OPTIONAL for semgrep backend *)
         repo_url = self#repo_url;
         repo_display_name = Some self#repo_display_name;
         branch = self#branch;
         ci_job_url = self#ci_job_url;
         commit = self#commit_sha;
-        commit_author_email = Some (Emile.to_string commit_author_email);
+        commit_author_email = Some commit_author_email_str;
         commit_author_name = Some commit_author_name;
         commit_author_username = None;
         commit_author_image_url = None;
@@ -188,7 +192,7 @@ class meta (caps : < Cap.exec >) ~scan_environment
       | Some repo_url -> Some repo_url
       | None -> (
           let cmd = (Cmd.Name "git", [ "remote"; "get-url"; "origin" ]) in
-          match UCmd.string_of_run ~trim:true cmd with
+          match CapExec.string_of_run caps#exec ~trim:true cmd with
           | Ok (str, _status) ->
               Project_metadata.get_url_from_sstp_url (Some str)
           | Error (`Msg _err) ->
@@ -204,7 +208,7 @@ class meta (caps : < Cap.exec >) ~scan_environment
       | Some branch -> Some branch
       | None -> (
           let cmd = (Cmd.Name "git", [ "rev-parse"; "--abbrev-ref"; "HEAD" ]) in
-          match UCmd.string_of_run ~trim:true cmd with
+          match CapExec.string_of_run caps#exec ~trim:true cmd with
           | Ok (branch, (_, `Exited 0)) -> Some branch
           | Ok _
           | Error (`Msg _) ->
@@ -217,7 +221,7 @@ class meta (caps : < Cap.exec >) ~scan_environment
       | Some sha1 -> Some sha1
       | None -> (
           let cmd = (Cmd.Name "git", [ "rev-parse"; "HEAD" ]) in
-          match UCmd.string_of_run ~trim:true cmd with
+          match CapExec.string_of_run caps#exec ~trim:true cmd with
           | Ok (str, (_, `Exited 0)) -> Digestif.SHA1.of_hex_opt str
           | Ok _
           | Error (`Msg _) ->

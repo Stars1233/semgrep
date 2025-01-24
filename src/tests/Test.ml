@@ -1,3 +1,21 @@
+(* Yoann Padioleau
+ *
+ * Copyright (C) 2024 Semgrep, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation, with the
+ * special exception on linking described in file LICENSE.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
+open Common
+
+let t = Testo.create
+
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
@@ -9,15 +27,61 @@
  *
  * to run all the OCaml tests containing foo in their test name.
  *
- * This file used to contain lots of tests, but it's better to now
+ * hisyory: this file used to contain lots of tests, but it's better to now
  * distribute them in their relevant directory (e.g., engine/Unit_engine.ml)
  *)
-
-let t = Testo.create
 
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
+
+let parse_env_entry ~ignore_empty s =
+  match String.index_opt s '=' with
+  | Some i ->
+      let k = String_.safe_sub s 0 i in
+      let v = String_.safe_sub s (i + 1) (String.length s - i - 1) in
+      if ignore_empty && v = "" then None else Some (k, v)
+  | None -> None
+
+(* Get the set of environment variables and their values, optionally
+   excluding empty values. *)
+let get_environment ~ignore_empty () =
+  Unix.environment () |> Array.to_list
+  |> List_.filter_map (parse_env_entry ~ignore_empty)
+  |> Set_.of_list
+
+let string_of_set (set : (string * string) Set_.t) =
+  set |> Set_.elements
+  |> List_.map (fun (k, v) -> spf "%s=%s" k v)
+  |> String.concat ", "
+
+(*
+   Wrap the test function so as to check no environment variables were altered
+   and not restored during the test.
+
+   TODO: if this proves useful, move it to Testo
+*)
+let with_env_check ?(ignore_empty = false) (test : Testo.t) =
+  let func () =
+    let orig_env = get_environment ~ignore_empty () in
+    Common.protect test.func ~finally:(fun () ->
+        let final_env = get_environment ~ignore_empty () in
+        let removed = Set_.diff orig_env final_env in
+        let added = Set_.diff final_env orig_env in
+        if not (Set_.is_empty removed && Set_.is_empty added) then
+          let msg =
+            spf
+              {|One or more environment variables changed during the test.%s
+  * removed bindings: %s
+  * added bindings: %s|}
+              (if ignore_empty then
+                 "\nVariables bound to empty values are treated as unbound."
+               else "")
+              (string_of_set removed) (string_of_set added)
+          in
+          failwith msg)
+  in
+  Testo.update ~func test
 
 let any_gen_of_string str =
   let any = Parse_python.any_of_string str in
@@ -37,7 +101,6 @@ let cleanup_before_each_test (reset : unit -> unit) (tests : Testo.t list) :
 (*****************************************************************************)
 (* All tests *)
 (*****************************************************************************)
-
 (*
    Some test suites are created from files present in file system.
    To avoid errors during module initialization when running 'dune utop'
@@ -68,8 +131,6 @@ let tests (caps : Cap.all_caps) =
       Unit_ugly_print_AST.tests;
       Unit_autofix.tests;
       Unit_autofix_printer.tests;
-      Unit_synthesizer.tests;
-      Unit_synthesizer_targets.tests;
       Unit_dataflow.tests
         (caps :> < Cap.time_limit >)
         Parse_target.parse_program;
@@ -79,50 +140,33 @@ let tests (caps : Cap.all_caps) =
       (* just expression vs expression testing for one language (Python) *)
       Unit_matcher.tests ~any_gen_of_string;
       (* TODO Unit_matcher.spatch_unittest ~xxx *)
-      (* TODO Unit_matcher_php.unittest; (* sgrep, spatch, refactoring, unparsing *) *)
+      (* TODO Unit_matcher_php.unittest; sgrep/spatch/refactoring/unparsing *)
       Unit_engine.tests ();
       Unit_jsonnet.tests (caps :> < Cap.time_limit >);
       Unit_metachecking.tests (caps :> Core_scan.caps);
-      (* OSemgrep tests *)
+      (* osemgrep unit tests *)
       Unit_LS.tests (caps :> Session.caps);
       Unit_Login.tests caps;
       Unit_Fetching.tests (caps :> < Cap.network ; Cap.tmp >);
+      Unit_reporting.tests (caps :> < >);
+      Unit_ci.tests;
       Test_is_blocking_helpers.tests;
-      Test_login_subcommand.tests (caps :> < Cap.stdout ; Cap.network >);
-      Test_scan_subcommand.tests
-        (caps
-          :> < Cap.stdout
-             ; Cap.network
-             ; Cap.tmp
-             ; Cap.chdir
-             ; Cap.fork
-             ; Cap.time_limit
-             ; Cap.memory_limit >);
-      Unit_test_subcommand.tests
-        (caps
-          :> < Cap.stdout
-             ; Cap.fork
-             ; Cap.time_limit
-             ; Cap.memory_limit
-             ; Cap.tmp >);
-      Test_show_subcommand.tests
-        (caps :> < Cap.stdout ; Cap.network ; Cap.tmp >);
+      (* osemgrep e2e subcommand tests *)
+      Test_login_subcommand.tests (caps :> Login_subcommand.caps);
+      Test_scan_subcommand.tests (caps :> Scan_subcommand.caps);
+      Test_ci_subcommand.tests (caps :> Ci_subcommand.caps);
+      Unit_test_subcommand.tests (caps :> Test_subcommand.caps);
+      Test_show_subcommand.tests (caps :> Show_subcommand.caps);
       Test_publish_subcommand.tests
-        (caps :> < Cap.stdout ; Cap.network ; Cap.tmp >);
+        (* = Publish_subcommand.caps + Cap.exec for 'semgrep login' *)
+        (caps :> < Cap.stdout ; Cap.network ; Cap.tmp ; Cap.exec >);
       Test_osemgrep.tests (caps :> CLI.caps);
       Test_target_selection.tests (caps :> CLI.caps);
       (* Networking tests disabled as they will get rate limited sometimes *)
       (* And the SSL issues they've been testing have been stable *)
       (*Unit_Networking.tests;*)
-      Test_LS_e2e.tests
-        (caps
-          :> < Cap.random
-             ; Cap.network
-             ; Cap.tmp
-             ; Cap.fork
-             ; Cap.time_limit
-             ; Cap.memory_limit >);
-      (* End OSemgrep tests *)
+      Test_LS_e2e.tests (caps :> Lsp_subcommand.caps);
+      (* End osemgrep tests *)
       Spacegrep_tests.Test.tests ();
       Aliengrep.Unit_tests.tests;
       Unit_core_json_output.tests;
@@ -145,7 +189,7 @@ let tests (caps : Cap.all_caps) =
 let tests_with_delayed_error caps =
   try
     Printf.printf "Gathering tests from %s...\n%!" (Sys.getcwd ());
-    let tests = tests caps in
+    let tests = tests caps |> List_.map (with_env_check ~ignore_empty:true) in
     Printf.printf "Done gathering tests.\n%!";
     tests
   with
@@ -160,6 +204,9 @@ let main (caps : Cap.all_caps) : unit =
   (* find the root of the semgrep repo as many of our tests rely on
      'let test_path = "tests/"' to find their test files *)
   let project_root = Test_LS_e2e.project_root () in
+  (* Don't read ~/.gitconfig since it varies from one developer to another,
+     resulting in variable output *)
+  Unix.putenv "GIT_CONFIG_NOGLOBAL" "true";
   Testutil_files.with_chdir project_root (fun () ->
       (* coupling: partial copy of the content of CLI.main() *)
       Core_CLI.register_exception_printers ();
@@ -177,7 +224,7 @@ let main (caps : Cap.all_caps) : unit =
       (* Show log messages produced when building the list of tests *)
       reset ();
       (* let's go *)
-      Testo.interpret_argv ~project_name:"semgrep-core" (fun () ->
+      Testo.interpret_argv ~project_name:"semgrep-core" (fun _env ->
           tests_with_delayed_error caps |> cleanup_before_each_test reset))
 
 let () = Cap.main (fun all_caps -> main all_caps)

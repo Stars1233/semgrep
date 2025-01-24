@@ -272,7 +272,6 @@ class ConfigLoader:
                 repo_name = "unknown"
 
         return out.ProjectMetadata(
-            semgrep_version=out.Version(__VERSION__),
             scan_environment="semgrep-scan",
             repository=repo_name,
             repo_display_name=repo_display_name,
@@ -310,7 +309,6 @@ class ConfigLoader:
         )
 
         request = out.ScanRequest(
-            meta=out.RawJson({}),  # required for now, but we won't populate it
             scan_metadata=out.ScanMetadata(
                 cli_version=out.Version(__VERSION__),
                 unique_id=out.Uuid(str(state.local_scan_id)),
@@ -360,6 +358,7 @@ class ConfigLoader:
                 )
 
             scan_response = out.ScanResponse.from_json(response.json())
+            get_state().traces.set_scan_info(scan_response.info)
             return ConfigFile(None, scan_response.config.rules.to_json_string(), url)
 
         except requests.exceptions.RetryError as ex:
@@ -573,7 +572,8 @@ class Config:
 
         for i, config in enumerate(configs):
             try:
-                # Patch config_id to fix https://github.com/returntocorp/semgrep/issues/1912
+                # Patch config_id to fix
+                # https://github.com/semgrep/semgrep/issues/1912
                 resolved_config, config_errors = resolve_config(
                     config, project_url, force_jsonschema=force_jsonschema
                 )

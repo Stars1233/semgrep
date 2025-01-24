@@ -21,7 +21,7 @@
 (generate_opam_files)
 
 ;; set here so the semgrep package below can use it and we can easily bump it
-(version 1.95.0)
+(version 1.104.0)
 
 ;; Default attributes of opam packages
 (source (github semgrep/semgrep))
@@ -443,6 +443,10 @@ For more information see https://semgrep.dev
 ;coupling: because of the way we need to statically link on macOS, if
 ; you add a library here, you'll probably need to update src/main/flags.sh
 ; if this library has some C stubs.
+;
+; coupling: if you add a dependency here and the nix workflow fails, you may
+; need to manually trigger the "nix-weekly-update-flake" workflow
+;
 ;TODO: restore  "bisect_ppx" {>= "2.5.0"} once can use ppxlib 0.22.0
   (depends
     ; core deps
@@ -486,7 +490,7 @@ For more information see https://semgrep.dev
     cmdliner
     ; PPX
     ppxlib
-    ppx_deriving
+    (ppx_deriving ( >= 6.0.3 ))
     ppx_deriving_yojson
     ppx_hash
     ppx_inline_test
@@ -520,9 +524,7 @@ For more information see https://semgrep.dev
     ; web stuff
     uri
     (uuidm (>= 0.9.9))
-    ; cohttp >= 6.0.0 requires opam 2.1.0 which used to not available in Windows
-    ; TODO: now that opam 2.2.0 is out and support windows, upgrade to 6.0.0
-    (cohttp (= 5.3.0))
+    (cohttp (= 6.0.0)) ; 6.0.0 for better error handling
     cohttp-lwt-unix
     cohttp-lwt-jsoo
     tls-lwt ; needed for TLS support in the cohttp HTTP client (only TLS 1.3 seems to work)

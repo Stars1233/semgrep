@@ -166,7 +166,7 @@ let log_parsing_errors file (res : Parsing_result2.t) =
 let dump_pattern (file : Fpath.t) =
   let s = UFile.read_file file in
   (* mostly copy-paste of parse_pattern in runner, but with better error report *)
-  let lang = Xlang.lang_of_opt_xlang_exn !lang in
+  let lang = Analyzer.lang_of_opt_analyzer_exn !lang in
   Core_actions.try_with_log_exn_and_reraise file (fun () ->
       (* TODO? enable "semgrep.parsing" log level *)
       match Parse_pattern.parse_pattern lang s with
@@ -360,20 +360,6 @@ let mk_config () : Core_scan_config.t =
 (* The actions *)
 (*****************************************************************************)
 
-(* Obtain the language set with -lang if it provides a generic AST
-   TODO: don't rely on a ref being initialized to do this.
-*)
-let get_lang () =
-  match !lang with
-  | None -> None
-  | Some x -> (
-      match x with
-      | L (lang, _other_langs) -> Some lang
-      | LRegex
-      | LSpacegrep
-      | LAliengrep ->
-          None)
-
 let all_actions (caps : Cap.all_caps) () =
   [
     (* this is run by pysemgrep --validate *)
@@ -392,7 +378,7 @@ let all_actions (caps : Cap.all_caps) () =
       Arg_.mk_action_n_arg (fun xs ->
           Test_parsing.parsing_stats
             (caps :> < Cap.time_limit ; Cap.memory_limit >)
-            (Xlang.lang_of_opt_xlang_exn !lang)
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
             ~json:
               (match !output_format with
               | Json _ -> true
@@ -401,14 +387,6 @@ let all_actions (caps : Cap.all_caps) () =
                   false)
             ~verbose:true xs) );
     (* The rest should be used just interactively by PA developers *)
-
-    (* possibly useful to the user *)
-    ( "-show_ast_json",
-      " <file> dump on stdout the generic AST of file in JSON",
-      Arg_.mk_action_1_conv Fpath.v (Core_actions.dump_v1_json ~get_lang) );
-    ( "-generate_ast_json",
-      " <file> save in file.ast.json the generic AST of file in JSON",
-      Arg_.mk_action_1_conv Fpath.v Core_actions.generate_ast_json );
     ( "-prefilter_of_rules",
       " <file> dump the prefilter regexps of rules in JSON ",
       Arg_.mk_action_1_conv Fpath.v Core_actions.prefilter_of_rules );
@@ -427,13 +405,13 @@ let all_actions (caps : Cap.all_caps) () =
         Arg_.mk_action_1_conv Fpath.v
           (dump_ast ~naming:false
              (caps :> < Cap.stdout ; Cap.exit >)
-             (Xlang.lang_of_opt_xlang_exn !lang))
+             (Analyzer.lang_of_opt_analyzer_exn !lang))
           file );
     ( "-dump_lang_ast",
       " <file>",
       fun file ->
         Arg_.mk_action_1_conv Fpath.v
-          (Test_parsing.dump_lang_ast (Xlang.lang_of_opt_xlang_exn !lang))
+          (Test_parsing.dump_lang_ast (Analyzer.lang_of_opt_analyzer_exn !lang))
           file );
     ( "-dump_named_ast",
       " <file>",
@@ -441,7 +419,7 @@ let all_actions (caps : Cap.all_caps) () =
         Arg_.mk_action_1_conv Fpath.v
           (dump_ast ~naming:true
              (caps :> < Cap.stdout ; Cap.exit >)
-             (Xlang.lang_of_opt_xlang_exn !lang))
+             (Analyzer.lang_of_opt_analyzer_exn !lang))
           file );
     ( "-dump_il_all",
       " <file>",
@@ -462,59 +440,37 @@ let all_actions (caps : Cap.all_caps) () =
       " <file> dump the CST obtained from a tree-sitter parser",
       Arg_.mk_action_1_conv Fpath.v (fun file ->
           Test_parsing.dump_tree_sitter_cst
-            (Xlang.lang_of_opt_xlang_exn !lang)
-            !!file) );
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
+            file) );
     ( "-dump_tree_sitter_pattern_cst",
       " <file>",
       Arg_.mk_action_1_conv Fpath.v (fun file ->
           Parse_pattern2.dump_tree_sitter_pattern_cst
-            (Xlang.lang_of_opt_xlang_exn !lang)
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
             file) );
     ( "-dump_pfff_ast",
       " <file> dump the generic AST obtained from a pfff parser",
       Arg_.mk_action_1_conv Fpath.v (fun file ->
-          Test_parsing.dump_pfff_ast (Xlang.lang_of_opt_xlang_exn !lang) file)
-    );
+          Test_parsing.dump_pfff_ast
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
+            file) );
     ( "-diff_pfff_tree_sitter",
       " <file>",
       Arg_.mk_action_n_arg (fun xs ->
           Test_parsing.diff_pfff_tree_sitter (Fpath_.of_strings xs)) );
     (* Misc stuff *)
-    ( "-expr_at_range",
-      " <l:c-l:c> <file>",
-      Arg_.mk_action_2_arg (fun range file ->
-          Test_synthesizing.expr_at_range range (Fpath.v file)) );
-    ( "-synthesize_patterns",
-      " <l:c-l:c> <file>",
-      Arg_.mk_action_2_arg (fun range file ->
-          Test_synthesizing.synthesize_patterns range (Fpath.v file)) );
-    ( "-generate_patterns",
-      " <l:c-l:c>+ <file>",
-      Arg_.mk_action_n_arg Test_synthesizing.generate_pattern_choices );
-    ( "-locate_patched_functions",
-      " <file>",
-      Arg_.mk_action_1_conv Fpath.v Test_synthesizing.locate_patched_functions
-    );
-    ( "-stat_matches",
-      " <marshalled file>",
-      Arg_.mk_action_1_conv Fpath.v
-        (Experiments.stat_matches (caps :> < Cap.stdout >)) );
-    ( "-ebnf_to_menhir",
-      " <ebnf file>",
-      Arg_.mk_action_1_conv Fpath.v
-        (Experiments.ebnf_to_menhir (caps :> < Cap.stdout >)) );
     ( "-parsing_regressions",
       " <files or dirs> look for parsing regressions",
       Arg_.mk_action_n_arg (fun xs ->
           Test_parsing.parsing_regressions
             (caps :> < Cap.time_limit ; Cap.memory_limit >)
-            (Xlang.lang_of_opt_xlang_exn !lang)
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
             (Fpath_.of_strings xs)) );
     ( "-test_parse_tree_sitter",
       " <files or dirs> test tree-sitter parser on target files",
       Arg_.mk_action_n_arg (fun xs ->
           Test_parsing.test_parse_tree_sitter
-            (Xlang.lang_of_opt_xlang_exn !lang)
+            (Analyzer.lang_of_opt_analyzer_exn !lang)
             (Fpath_.of_strings xs)) );
     ( "-translate_rules",
       " <files or dirs>",
@@ -527,13 +483,14 @@ let all_actions (caps : Cap.all_caps) () =
     ( "-parse_rules",
       " <files or dirs>",
       Arg_.mk_action_n_conv Fpath.v Test_parsing.test_parse_rules );
-    ( "-datalog_experiment",
-      " <file> <dir>",
-      Arg_.mk_action_2_arg (fun a b ->
-          Datalog_experiment.gen_facts (Fpath.v a) (Fpath.v b)) );
     ("-test_eval", " <JSON file>", Arg_.mk_action_1_arg Eval_generic.test_eval);
+    ( "-sarif_sort",
+      " <JSON file>",
+      Arg_.mk_action_1_conv Fpath.v Core_actions.sarif_sort );
   ]
-  @ Test_analyze_generic.actions ~parse_program:Parse_target.parse_program
+  @ Test_analyze_generic.actions
+      (caps :> < Cap.exec ; Cap.tmp >)
+      ~parse_program:Parse_target.parse_program
   @ Test_dataflow_tainting.actions ()
   @ Test_naming_generic.actions ~parse_program:Parse_target.parse_program
 
@@ -550,11 +507,11 @@ let options caps (actions : unit -> Arg_.cmdline_actions) =
       Arg.String (fun s -> target_file := Some (Fpath.v s)),
       " <file> obtain list of targets to run patterns on" );
     ( "-lang",
-      Arg.String (fun s -> lang := Some (Xlang.of_string s)),
+      Arg.String (fun s -> lang := Some (Analyzer.of_string s)),
       spf " <str> choose language (valid choices:\n     %s)"
-        Xlang.supported_xlangs );
+        Analyzer.supported_analyzers );
     ( "-l",
-      Arg.String (fun s -> lang := Some (Xlang.of_string s)),
+      Arg.String (fun s -> lang := Some (Analyzer.of_string s)),
       spf " <str> shortcut for -lang" );
     ( "-equivalences",
       Arg.String (fun s -> equivalences_file := Some (Fpath.v s)),
@@ -733,7 +690,7 @@ let register_exception_printers () =
 (* if !Flag.gc_tuning && config.max_memory_mb = 0 then set_gc (); *)
 
 let run caps (config : Core_scan_config.t) : unit =
-  let res = Core_scan.scan (caps :> Core_scan.caps) config in
+  let res = Core_scan.scan caps config in
   output_core_results
     (caps :> < Cap.stdout ; Cap.stderr ; Cap.exit >)
     res config
@@ -797,10 +754,14 @@ let main_exn (caps : Cap.all_caps) (argv : string array) : unit =
 
   (* hacks to reduce the size of engine.js
    * coupling: if you add an init() call here, you probably need to modify
-   * also tests/Test.ml and osemgrep/cli/CLI.ml
+   * also tests/Test.ml, CLI.ml, and Pro_core_CLI.ml
    *)
   Parsing_init.init ();
   Data_init.init ();
+
+  (* TODO? Http_helpers.set_client_ref (module Cohttp_lwt_unix.Client);
+   * we do it in Pro_core_CLI.ml so why not here too?
+   *)
 
   (* must be done after Arg.parse, because Common.profile is set by it *)
   Profiling.profile_code "Main total" (fun () ->
@@ -829,7 +790,8 @@ let main_exn (caps : Cap.all_caps) (argv : string array) : unit =
           let target_source : Core_scan_config.target_source =
             match (!target_file, !lang, roots) with
             | Some file, None, [] -> Target_file file
-            | None, Some lang, [ file ] when UFile.is_file file ->
+            | None, Some lang, [ file ]
+              when UFile.is_reg ~follow_symlinks:true file ->
                 Targets [ Target.mk_target lang file ]
             | _ ->
                 (* alt: use the file targeting in targets_of_config_DEPRECATED
@@ -853,17 +815,17 @@ let main_exn (caps : Cap.all_caps) (argv : string array) : unit =
           match config.tracing with
           | None -> run caps config
           | Some tracing ->
-              let trace_data =
-                Trace_data.get_top_level_data config.ncores Version.version
-                  (Trace_data.no_analysis_features ())
+              let resource_attrs =
+                (* Let's make sure all traces/logs/metrics etc. are tagged as
+                   coming from the OSS invocation *)
+                Trace_data.get_resource_attrs ?env:tracing.env ~engine:"oss"
+                  ~analysis_flags:(Trace_data.no_analysis_features ())
+                  ~jobs:config.ncores ()
               in
-              Tracing.configure_tracing
-              (* Let's make sure all traces/logs/metrics etc. are tagged as coming from the pro invocation *)
-                ~attrs:[ ("engine", `String "oss") ]
-                ?env:tracing.env ~version:Version.version "semgrep-core"
+              Tracing.configure_tracing ~attrs:resource_attrs "semgrep-core"
                 tracing.endpoint;
-              Tracing.with_tracing "Core_command.semgrep_core_dispatch"
-                trace_data (fun span_id ->
+              Tracing.with_tracing "Core_command.semgrep_core_dispatch" []
+                (fun span_id ->
                   let tracing =
                     { tracing with top_level_span = Some span_id }
                   in

@@ -15,7 +15,9 @@ local wheel_name = 'osx-x86-wheel';
 // See https://github.com/actions/runner-images/blob/main/images/macos/macos-12-Readme.md
 // This already comes with Python installed so no need to
 // have a setup_python_step like in build-test-osx-arm64.jsonnet
-local runs_on = 'macos-12';
+// Macos 13 is the last version that has x86 + osx; macos-14 and above are arm
+// only
+local runs_on = 'macos-13';
 
 // This is reused in build-test-osx-arm64.jsonnet
 local test_semgrep_steps = [
@@ -61,9 +63,12 @@ local build_core_job = {
     semgrep.cache_opam.step(
          key=semgrep.opam_switch + "-${{hashFiles('semgrep.opam')}}")
       + semgrep.cache_opam.if_cache_inputs,
+    semgrep.opam_setup(),
     {
       name: 'Install dependencies',
-      run: './scripts/osx-setup-for-release.sh "%s"' % semgrep.opam_switch,
+      run: |||
+        make install-deps-MACOS-for-semgrep-core
+      |||,
     },
     {
       name: 'Compile semgrep (in case of linking errors, adjust src/main/flags.sh)',
@@ -90,7 +95,7 @@ local build_wheels_job = {
       |||,
     },
     {
-      uses: 'actions/upload-artifact@v3',
+      uses: 'actions/upload-artifact@v4',
       with: {
         path: 'cli/dist.zip',
         name: wheel_name,

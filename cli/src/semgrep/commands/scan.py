@@ -378,8 +378,8 @@ _scan_options: List[Callable] = [
         is_flag=True,
     ),
     optgroup.option(
-        "--allow-dynamic-dependency-resolution",
-        "allow_dynamic_dependency_resolution",
+        "--allow-local-builds",
+        "allow_local_builds",
         is_flag=True,
         default=False,
     ),
@@ -469,6 +469,11 @@ def scan_options(func: Callable) -> Callable:
 )
 @optgroup.option("--version", is_flag=True, default=False)
 @optgroup.option(
+    "--x-ignore-semgrepignore-files",
+    is_flag=True,
+    default=False,
+)
+@optgroup.option(
     "--x-ls",
     is_flag=True,
     default=False,
@@ -502,13 +507,6 @@ def scan_options(func: Callable) -> Callable:
     "--secrets",
     "run_secrets_flag",
     is_flag=True,
-)
-@optgroup.group("Osemgrep migration options")
-@optgroup.option(
-    "--use-osemgrep-sarif",
-    "use_osemgrep_sarif",
-    is_flag=True,
-    default=False,
 )
 @scan_options
 @handle_command_errors
@@ -572,14 +570,14 @@ def scan(
     trace: bool,
     trace_endpoint: Optional[str],
     use_git_ignore: bool,
-    use_osemgrep_sarif: bool,
     validate: bool,
     verbose: bool,
     version: bool,
+    x_ignore_semgrepignore_files: bool,
     x_ls: bool,
     x_ls_long: bool,
     path_sensitive: bool,
-    allow_dynamic_dependency_resolution: bool,
+    allow_local_builds: bool,
 ) -> Optional[Tuple[RuleMatchMap, List[SemgrepError], List[Rule], Set[Path]]]:
     if version:
         print(__VERSION__)
@@ -680,10 +678,6 @@ def scan(
             semgrep.config_resolver.adjust_for_docker()
             targets = (os.curdir,)
 
-        use_osemgrep_to_format: Set[OutputFormat] = set()
-        if use_osemgrep_sarif:
-            use_osemgrep_to_format.add(OutputFormat.SARIF)
-
         outputs = collect_additional_outputs(
             outputs_text=outputs_text,
             outputs_emacs=outputs_emacs,
@@ -707,7 +701,6 @@ def scan(
             dataflow_traces=dataflow_traces,
             max_log_list_entries=max_log_list_entries,
             # those are not set in ci.py as they are scan-specific flags
-            use_osemgrep_to_format=use_osemgrep_to_format,
             error_on_findings=error_on_findings,
             strict=strict,
         )
@@ -737,7 +730,8 @@ def scan(
             # mostly repeating the loop in write_pipes_to_disk to detect if we
             # need --scan-unknown-extensions.
             for t in targets:
-                if t == "-" or Path(t).is_fifo():
+                path = Path(t)
+                if t == "-" or (os.access(path, os.R_OK) and path.is_fifo()):
                     logger.debug(
                         "stdin or piped targets, adding --scan-unknown-extensions"
                     )
@@ -814,6 +808,7 @@ def scan(
                         _dependency_parser_errors,
                         executed_rule_count,
                         missed_rule_count,
+                        _all_subprojects,
                     ) = semgrep.run_scan.run_scan(
                         diff_depth=diff_depth,
                         dump_command_for_core=dump_command_for_core,
@@ -840,6 +835,7 @@ def scan(
                         dryrun=dryrun,
                         disable_nosem=(not enable_nosem),
                         no_git_ignore=(not use_git_ignore),
+                        respect_semgrepignore=(not x_ignore_semgrepignore_files),
                         timeout=timeout,
                         max_memory=max_memory,
                         timeout_threshold=timeout_threshold,
@@ -855,7 +851,7 @@ def scan(
                         x_ls_long=x_ls_long,
                         path_sensitive=path_sensitive,
                         capture_core_stderr=capture_core_stderr,
-                        allow_dynamic_dependency_resolution=allow_dynamic_dependency_resolution,
+                        allow_local_builds=allow_local_builds,
                     )
                 except SemgrepError as e:
                     output_handler.handle_semgrep_errors([e])

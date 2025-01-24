@@ -87,9 +87,9 @@ let run_semgrep ?(targets : Fpath.t list option) ?rules ?git_ref
         let core_run_func =
           let pro_intrafile =
             session.user_settings.pro_intrafile
-            && Semgrep_settings.has_api_token ()
+            && Semgrep_login.is_logged_in_weak ()
           in
-          match !Core_runner.hook_mk_pro_core_run_for_osemgrep with
+          match Hook.get Core_runner.hook_mk_pro_core_run_for_osemgrep with
           | Some pro_scan_func when pro_intrafile ->
               (* THINK: files or folders?
                  Note that converting many target files to scanning roots
@@ -138,8 +138,7 @@ let run_semgrep ?(targets : Fpath.t list option) ?rules ?git_ref
                        available, as the user is not logged in, or there is no \
                        pro binary available. Running with the OSS engine \
                        instead.");
-              Core_runner.mk_core_run_for_osemgrep
-                (Core_scan.scan (session.caps :> Core_scan.caps))
+              Core_runner.mk_core_run_for_osemgrep (Core_scan.scan session.caps)
         in
         Logs.debug (fun m ->
             m "Running Semgrep with %d rules" (List.length rules));
@@ -201,16 +200,15 @@ let run_semgrep_detached ?targets ?rules ?git_ref (session : Session.t) =
    In the interim, we will just continue to hook into core.
 *)
 let run_core_search xconf rule (file : Fpath.t) =
-  let hook = Fun.id in
-  let xlang = rule.Rule.target_analyzer in
+  let analyzer = rule.Rule.target_analyzer in
   (* We have to look at all the initial files again when we do this.
      TODO: Maybe could be better to infer languages from each file,
      so we only have to look at each file once.
   *)
-  if Filter_target.filter_target_for_xlang xlang file then
+  if Filter_target.filter_target_for_analyzer analyzer file then
     let xtarget =
       Xtarget.resolve parse_and_resolve_name
-        (Target.mk_regular xlang Product.all (File file))
+        (Target.mk_regular analyzer Product.all (File file))
     in
     try
       let is_relevant_rule =
@@ -221,7 +219,7 @@ let run_core_search xconf rule (file : Fpath.t) =
       if is_relevant_rule then
         (* !!calling the engine!! *)
         let ({ Core_result.matches; _ } : _ Core_result.match_result) =
-          Match_search_mode.check_rule rule hook xconf xtarget
+          Match_search_mode.check_rule rule ~matches_hook:Fun.id xconf xtarget
         in
         let matches_with_fixes =
           matches

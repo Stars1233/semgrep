@@ -74,7 +74,7 @@
  *    tuple assignments (e.g., a,b=1,2) are not expanded in multiple assigns
  *    because this is not always possible (e.g., a,b=foo()) and people may
  *    want to explicitely match tuples assignments (we do some magic in
- *    Generic_vs_generic though to let 'a=1' matches also 'a,b=1,2').
+ *    Pattern_vs_code though to let 'a=1' matches also 'a,b=1,2').
  *  - multiple entity imports in one declaration (e.g., from foo import {a,b})
  *    are expanded in multiple individual imports
  *    (in the example, from foo import a; from foo import b).
@@ -178,7 +178,7 @@
  * convenient to correspond mostly to Semgrep versions. So version below
  * can jump from "1.12.1" to "1.20.0" and that's fine.
  *)
-let version = "1.93.0"
+let version = "1.103.0"
 
 (*****************************************************************************)
 (* Some notes on deriving *)
@@ -623,7 +623,7 @@ and id_info = {
    *   because the first `foo` has type `Foo` but that `Foo` has SId.t "n",
    *   whereas the second `foo` has type `Foo` but with SId.t "m".
    *)
-  id_type : type_ option ref; [@equal fun _a _b -> true]
+  id_type : type_ option ref; [@hash.ignore] [@equal fun _a _b -> true]
   (* type checker (typing) *)
   (* sgrep: this is for sgrep constant propagation hack.
    * todo? associate only with Id?
@@ -632,15 +632,15 @@ and id_info = {
    * meaning the same variable might have different id_svalue value
    * depending where it is used.
    *)
-  id_svalue : svalue option ref; [@equal fun _a _b -> true]
+  id_svalue : svalue option ref; [@hash.ignore] [@equal fun _a _b -> true]
   (* ^^^ THINK: Drop option? *)
   (* See module 'IdFlags'. Previously we compared 'id_flags' with 'IdFlags.equal'
    * but, once we added the 'final' flag which is only set at definition site,
    * the same identifier can now have different flags. In fact we did not really
    * have to compare 'id_flags' anyways. *)
-  id_flags : id_flags ref; [@equal fun _a _b -> true]
+  id_flags : id_flags ref; [@hash.ignore] [@equal fun _a _b -> true]
   (* this is used by Naming_SAST in semgrep-pro *)
-  id_info_id : id_info_id; [@equal fun _a _b -> true]
+  id_info_id : id_info_id; [@hash.ignore] [@equal fun _a _b -> true]
 }
 
 (* See explanation for @name where the visitors are generated at the end of
@@ -972,6 +972,8 @@ and special =
   | Super (* called 'base' in C# *)
   (* less: how different self/parent is from this/super? *)
   | Self
+  (* like `cls` in Python, which indicates the type, not the instance *)
+  | Cls
   | Parent
   (* for Lua, todo: just remove it, create Dict without key *)
   | NextArrayIndex
@@ -2056,7 +2058,7 @@ and directive_kind =
          * those documented in #5305 and #6532. Removing this desugaring lets us
          * match, for example, a pattern and a target which import the same
          * things but in a different order. *)
-      * (ident * alias option (* as name alias *)) list
+      * import_from_kind list
   | ImportAs of tok * module_name * alias option (* as name *)
   (* Bad practice! hard to resolve name locally.
    * We use ImportAll for C/C++ '#include', C++ 'using namespace', wildcard
@@ -2085,6 +2087,14 @@ and directive_kind =
 
 (* xxx as name *)
 and alias = ident * id_info
+
+and import_from_kind =
+  (* non-aliased import, like Python `from a import b` *)
+  | Direct of alias
+  (* import which is aliased into a different name, like Python
+     `from a import b as c`
+  *)
+  | Aliased of ident * alias
 
 (*****************************************************************************)
 (* Toplevel *)
@@ -2275,7 +2285,8 @@ let empty_id_info ?(hidden = false) ?(case_insensitive = false)
     id_resolved_alternatives = ref [];
     id_type = ref None;
     id_svalue = ref None;
-    id_flags = ref (IdFlags.make ~hidden ~case_insensitive ~final:false);
+    id_flags =
+      ref (IdFlags.make ~hidden ~case_insensitive ~final:false ~static:false);
     id_info_id = id;
   }
 

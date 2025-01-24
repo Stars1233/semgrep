@@ -39,7 +39,7 @@ type conf = {
   show : Show_CLI.conf option;
   validate : Validate_CLI.conf option;
   test : Test_CLI.conf option;
-  allow_dynamic_dependency_resolution : bool;
+  allow_local_builds : bool;
   (* --x-* options are experimental forever! (= subject to change or removal
      without notice) *)
   (* --x-ls: *)
@@ -74,7 +74,7 @@ val o_exclude : string list Cmdliner.Term.t
 val o_secrets : bool Cmdliner.Term.t
 
 (* exported because used by Ci_CLI.ml *)
-val o_allow_dynamic_dependency_resolution : bool Cmdliner.Term.t
+val o_allow_local_builds : bool Cmdliner.Term.t
 val o_allow_untrusted_validators : bool Cmdliner.Term.t
 val o_autofix : bool Cmdliner.Term.t
 val o_baseline_commit : string option Cmdliner.Term.t
@@ -116,7 +116,6 @@ val o_pro : bool Cmdliner.Term.t
 val o_pro_intrafile : bool Cmdliner.Term.t
 val o_pro_languages : bool Cmdliner.Term.t
 val o_pro_path_sensitive : bool Cmdliner.Term.t
-val o_respect_gitignore : bool Cmdliner.Term.t
 val o_rewrite_rule_ids : bool Cmdliner.Term.t
 val o_sarif : bool Cmdliner.Term.t
 val o_sarif_outputs : string list Cmdliner.Term.t
@@ -130,6 +129,7 @@ val o_timeout_interfile : int Cmdliner.Term.t
 val o_timeout_threshold : int Cmdliner.Term.t
 val o_trace : bool Cmdliner.Term.t
 val o_trace_endpoint : string option Cmdliner.Term.t
+val o_use_git : bool Cmdliner.Term.t
 val o_version_check : bool Cmdliner.Term.t
 val o_vim : bool Cmdliner.Term.t
 val o_vim_outputs : string list Cmdliner.Term.t

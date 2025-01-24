@@ -30,7 +30,7 @@ module Out = Semgrep_output_v1_t
    non_git_files: extra files that must be created but won't be git-added
                   (only relevant if with_git is true)
 *)
-let test_find_targets ?includes ?(excludes = [])
+let test_find_targets ?expected_outcome ?includes ?(excludes = [])
     ?(non_git_files : F.t list = []) ~with_git ?(scanning_root = ".") name
     (files : F.t list) =
   let category = if with_git then "with git" else "without git" in
@@ -62,7 +62,7 @@ let test_find_targets ?includes ?(excludes = [])
             exclude = excludes;
           }
         in
-        let targets, skipped_targets =
+        let targets, errors, skipped_targets =
           Find_targets.get_target_fpaths conf
             [ Scanning_root.of_fpath (Fpath.v scanning_root) ]
         in
@@ -76,6 +76,11 @@ let test_find_targets ?includes ?(excludes = [])
         | patterns ->
             printf "--- '--exclude' patterns ---\n";
             patterns |> List.iter (fun pat -> printf "%s\n" pat));
+        printf "--- Errors ---\n";
+        errors
+        |> List.iter (fun err ->
+               (* showing some ugly JSON is better than nothing *)
+               printf "%s\n" (Core_error.show err));
         printf "--- Selected targets ---\n";
         targets |> List.iter (fun path -> printf "selected %s\n" !!path);
         printf "--- Skipped targets ---\n";
@@ -84,7 +89,7 @@ let test_find_targets ?includes ?(excludes = [])
                printf "ignored %s [%s]\n" !!(x.path)
                  (Out.show_skip_reason x.reason)))
   in
-  Testo.create name test_func ~category:[ category ]
+  Testo.create name test_func ~category:[ category ] ?expected_outcome
     ~checked_output:(Testo.stdout ())
     ~normalize:
       [
@@ -112,6 +117,16 @@ let tests_with_or_without_git ~with_git =
       [ F.dir "dir" [ F.file "a"; F.file "b" ] ];
     test_find_targets ~with_git ~scanning_root:"a.py" "scanning root as a file"
       [ F.file "a.py" ];
+    (* Select the symlink and not the regular file it's pointing to. *)
+    test_find_targets ~with_git ~scanning_root:"a.py"
+      "scanning root as a symlink to a regular file"
+      [ F.Symlink ("a.py", "b.py"); F.File ("b.py", "some content") ];
+    test_find_targets ~with_git ~scanning_root:"a.py"
+      "scanning root as a symlink to a missing regular file"
+      [ F.Symlink ("a.py", "b.py") ];
+    test_find_targets ~with_git ~scanning_root:"link-to-src"
+      "scanning root as a symlink to a folder"
+      [ F.dir "src" [ F.file "a.py" ]; F.Symlink ("link-to-src", "src") ];
     (*
        Test that the '--include' filter takes place after all the other
        filters.
@@ -123,6 +138,21 @@ let tests_with_or_without_git ~with_git =
         F.File (".semgrepignore", "dir\n");
         F.dir "dir" [ F.file "a.c"; F.file "b.c" ];
         F.file "c.c";
+      ];
+    (* An explicit target is a scanning root that's also a target file
+       and should not be ignored by the usual exclusion mechanisms
+       (.semgrepignore, --include, --exclude) *)
+    test_find_targets ~with_git ~scanning_root:"a.py" "scan explicit target"
+      [ F.file "a.py"; F.File (".semgrepignore", "a.py\n") ];
+    (* Unspecified behavior: what to do with a scanning root that's
+       a symlink to a file that's semgrepignored? Should it be considered
+       an explicit target? This test assumes so. We could change it. *)
+    test_find_targets ~with_git ~scanning_root:"symlink.py"
+      "scan symlink to semgrepignored target"
+      [
+        F.symlink "symlink.py" "semgrepignored.py";
+        F.file "semgrepignored.py";
+        F.File (".semgrepignore", "semgrepignored.py\n");
       ];
   ]
 
@@ -147,7 +177,7 @@ let tests_with_git_only =
         F.file "c";
       ];
     test_find_targets ~with_git "symlinks from git are filtered too"
-      [ F.Symlink ("lnk", "inexistent"); F.File ("a", "some content") ];
+      [ F.Symlink ("lnk", "missing"); F.File ("a", "some content") ];
   ]
 
 let tests =

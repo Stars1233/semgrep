@@ -1,7 +1,3 @@
-=== command
-SEMGREP_USER_AGENT_APPEND="pytest" SEMGREP_SETTINGS_FILE="<MASKED>" SEMGREP_VERSION_CACHE_PATH="<MASKED>" SEMGREP_ENABLE_VERSION_CHECK="0" SEMGREP_SEND_METRICS="off" semgrep --strict --config rules/dependency_aware/python-requirements-sca.yaml --json targets/dependency_aware/requirement_pip
-=== end of command
-
 === exit code
 0
 === end of exit code
@@ -9,7 +5,6 @@ SEMGREP_USER_AGENT_APPEND="pytest" SEMGREP_SETTINGS_FILE="<MASKED>" SEMGREP_VERS
 === stdout - plain
 {
   "errors": [],
-  "interfile_languages_used": [],
   "paths": {
     "scanned": [
       "targets/dependency_aware/requirement_pip/foo.py",
@@ -27,11 +22,9 @@ SEMGREP_USER_AGENT_APPEND="pytest" SEMGREP_SETTINGS_FILE="<MASKED>" SEMGREP_VERS
       "extra": {
         "engine_kind": "OSS",
         "fingerprint": "0x42",
-        "is_ignored": false,
-        "lines": "bad()",
+        "lines": "requires login",
         "message": "oh no",
         "metadata": {},
-        "metavars": {},
         "sca_info": {
           "dependency_match": {
             "dependency_pattern": {
@@ -44,6 +37,7 @@ SEMGREP_USER_AGENT_APPEND="pytest" SEMGREP_SETTINGS_FILE="<MASKED>" SEMGREP_VERS
               "ecosystem": "pypi",
               "line_number": 37,
               "lockfile_path": "targets/dependency_aware/requirement_pip/requirement.pip",
+              "manifest_path": "targets/dependency_aware/requirement_pip/requirements.in",
               "package": "pandas",
               "transitivity": "direct",
               "version": "1.4.2"

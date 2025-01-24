@@ -1,5 +1,6 @@
 open Common
-module OutT = Semgrep_output_v1_t
+module Out = Semgrep_output_v1_t
+module J = JSON
 
 (*****************************************************************************)
 (* Prelude *)
@@ -7,7 +8,7 @@ module OutT = Semgrep_output_v1_t
 (* Output findings compatible with GitLab SAST JSON format.
 
    - Written based on:
-     https://github.com/returntocorp/semgrep-action/blob/678eff1a4269ed04b76631771688c8be860ec4e9/src/semgrep_agent/findings.py#L137-L165
+     https://github.com/semgrep/semgrep-action/blob/678eff1a4269ed04b76631771688c8be860ec4e9/src/semgrep_agent/findings.py#L137-L165
    - Docs:
      https://docs.gitlab.com/ee/user/application_security/sast/#reports-json-format
    - Schema:
@@ -34,18 +35,18 @@ let to_gitlab_severity = function
   | `Inventory ->
       "Unknown"
 
-let format_cli_match (cli_match : OutT.cli_match) =
+let format_cli_match (cli_match : Out.cli_match) : (string * JSON.yojson) list =
   let metadata = JSON.from_yojson cli_match.extra.metadata in
   let source =
     match JSON.member "source" metadata with
-    | Some (JSON.String s) -> s
+    | Some (J.String s) -> s
     | Some _
     | None ->
         "not available"
   in
   let confidence_details, confidence_flags =
     match JSON.member "confidence" metadata with
-    | Some (JSON.String c) ->
+    | Some (J.String c) ->
         ( [
             ( "confidence",
               `Assoc
@@ -69,31 +70,39 @@ let format_cli_match (cli_match : OutT.cli_match) =
     | Some _
     | None ->
         ([], [])
-  and exposure_details, exposure_flags =
-    ([], [])
-    (* TODO
-       if rule_match.exposure_type:
-         result["details"]["exposure"] = {
-             "type": "text",
-             "name": "exposure",
-             "value": rule_match.exposure_type,
-         }
-         if rule_match.exposure_type == "unreachable":
-             result["flags"].append(
-                 {
-                     "type": "flagged-as-likely-false-positive",
-                     "origin": "Semgrep Supply Chain",
-                     "description": (
-                         "Semgrep found no way to reach this vulnerability "
-                         "while scanning your code."
-                     ),
-                 }
-             )
-    *)
+  in
+  let exposure_details, exposure_flags =
+    match Exposure.of_cli_match_opt cli_match with
+    | None -> ([], [])
+    | Some exposure ->
+        ( [
+            ( "exposure",
+              `Assoc
+                [
+                  ("type", `String "text");
+                  ("name", `String "exposure");
+                  ("value", `String (Exposure.string_of exposure));
+                ] );
+          ],
+          match exposure with
+          | Unreachable ->
+              [
+                `Assoc
+                  [
+                    ("type", `String "flagged-as-likely-false-positive");
+                    ("origin", `String "Semgrep Supply Chain");
+                    ( "description",
+                      `String
+                        "Semgrep found no way to reach this vulnerability \
+                         while scanning your code." );
+                  ];
+              ]
+          | Reachable
+          | Undetermined ->
+              [] )
   in
   let id =
-    (* TODO the ?index argument needs to be provided (for ci_unique_key duplicates) *)
-    Semgrep_hashing_functions.ci_unique_key cli_match
+    Semgrep_hashing_functions.syntactic_id cli_match
     |> Uuidm.of_binary_string |> Option.get |> Uuidm.to_string
   in
   let r =
@@ -154,11 +163,30 @@ let format_cli_match (cli_match : OutT.cli_match) =
   in
   r
 
+let secrets_format_cli_match (cli_match : Out.cli_match) =
+  let r = format_cli_match cli_match in
+  let more =
+    [
+      ("category", `String "secret_detection");
+      ( "raw_source_code_extract",
+        `List [ `String (cli_match.extra.lines ^ "\n") ] );
+      ( "commit",
+        `Assoc
+          [
+            ("date", `String "1970-01-01T00:00:00Z");
+            (* Even the native Gitleaks based Gitlab secret detection
+               only provides a dummy value for now on relevant hash. *)
+            ("sha", `String "0000000");
+          ] );
+    ]
+  in
+  r @ more
+
 (*****************************************************************************)
 (* Entry points *)
 (*****************************************************************************)
 
-let output f (matches : OutT.cli_match list) : JSON.yojson =
+let output f (matches : Out.cli_match list) : JSON.yojson =
   let header =
     [
       ( "$schema",
@@ -178,13 +206,18 @@ let output f (matches : OutT.cli_match list) : JSON.yojson =
         ("vendor", `Assoc [ ("name", `String "Semgrep") ]);
       ]
   in
-  let start_time = Metrics_.g.payload.started_at
-  and end_time = Timedesc.Timestamp.now () in
+  let start_time = Metrics_.g.payload.started_at in
+  let end_time = Timedesc.Timestamp.now () in
+  (* bugfix: gitlab does not use the RFC 3339 date format but instead a
+   * yyyy-mm-ddThh:mm:ss custom format.
+   * See https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/941f497a3824d4393eb8a7efced497f738895ab4/dist/sast-report-format.json#L710
+   *)
+  let format = "{year}-{mon:0X}-{day:0X}T{hour:0X}:{min:0X}:{sec:0X}" in
   let scan =
     `Assoc
       [
-        ("start_time", `String (Timedesc.Timestamp.to_rfc3339 start_time));
-        ("end_time", `String (Timedesc.Timestamp.to_rfc3339 end_time));
+        ("start_time", `String (Timedesc.Timestamp.to_string ~format start_time));
+        ("end_time", `String (Timedesc.Timestamp.to_string ~format end_time));
         ("analyzer", tool);
         ("scanner", tool);
         ("version", `String Version.version);
@@ -194,7 +227,7 @@ let output f (matches : OutT.cli_match list) : JSON.yojson =
   in
   let vulnerabilities =
     List_.filter_map
-      (fun (cli_match : OutT.cli_match) ->
+      (fun (cli_match : Out.cli_match) ->
         match cli_match.extra.severity with
         | `Experiment
         | `Inventory ->
@@ -212,27 +245,8 @@ let output f (matches : OutT.cli_match list) : JSON.yojson =
   `Assoc
     (header @ [ ("scan", scan); ("vulnerabilities", `List vulnerabilities) ])
 
-let sast_output (matches : OutT.cli_match list) =
+let sast_output (matches : Out.cli_match list) : JSON.yojson =
   output format_cli_match matches
 
-let secrets_format_cli_match (cli_match : OutT.cli_match) =
-  let r = format_cli_match cli_match in
-  let more =
-    [
-      ("category", `String "secret_detection");
-      ( "raw_source_code_extract",
-        `List [ `String (cli_match.extra.lines ^ "\n") ] );
-      ( "commit",
-        `Assoc
-          [
-            ("date", `String "1970-01-01T00:00:00Z");
-            (* Even the native Gitleaks based Gitlab secret detection
-               only provides a dummy value for now on relevant hash. *)
-            ("sha", `String "0000000");
-          ] );
-    ]
-  in
-  r @ more
-
-let secrets_output (matches : OutT.cli_match list) : JSON.yojson =
+let secrets_output (matches : Out.cli_match list) : JSON.yojson =
   output secrets_format_cli_match matches

@@ -35,6 +35,15 @@ type config = {
 type user_data = Trace_core.user_data
 
 (*****************************************************************************)
+(* Constants *)
+(*****************************************************************************)
+module Attributes : sig
+  val version : string
+  val instance_id : string
+  val deployment_environment_name : string
+end
+
+(*****************************************************************************)
 (* Levels *)
 (*****************************************************************************)
 
@@ -46,9 +55,42 @@ type level =
 val show_level : level -> string
 
 (*****************************************************************************)
+(* Logging *)
+(*****************************************************************************)
+
+val no_telemetry_tag : string Logs.Tag.def
+(** [no_telemetry_tag] is a logging tag that when applied to a log, said log
+    will not be emitted by the tracing/telemetry backend.
+
+    Example:
+    {[
+      let tags = Logs.Tag.(
+          add no_telemetry_tag (name no_telemetry_tag) tags)
+      in
+      Logs.info (fun m ->
+          m ~tags
+            "This log will not be sent to the telemetry backend");
+    ]}
+*)
+
+val no_telemetry_tag_set : Logs.Tag.set
+(** [no_telemetry_tag_set] is a logging tag set containing {!no_telemetry_tag}.
+    See {!no_telemetry_tag} for more information, and an example *)
+
+val otel_reporter : Logs.reporter
+(** [otel_reporter] is a reporter that can be used with {!Logs.set_reporter} to
+    send logs to the Otel backend.To disable logging for just this reporter, tag
+    the log with {!no_telemetry_tag}
+
+    NOTE: This reporter WILL cause deadlocks if it is used in a GC alarm. To add
+    Logs to a GC alarm and not trigger this, tag them with
+    {!no_telemetry_tag} *)
+
+(*****************************************************************************)
 (* Functions to instrument the code *)
 (*****************************************************************************)
 
+(* for adding data *)
 val add_data_to_span : span -> (string * Trace_core.user_data) list -> unit
 (** Expose the Trace function to add data to a span *)
 
@@ -58,6 +100,7 @@ val add_data : (string * Trace_core.user_data) list -> config option -> unit
 val add_global_attribute : string -> Trace_core.user_data -> unit
 (** Expose the Trace function to add global attributes to the top level span *)
 
+(* manual span entering and exiting *)
 val enter_span :
   ?level:level ->
   ?__FUNCTION__:string ->
@@ -73,10 +116,6 @@ val enter_span :
 val exit_span : span -> unit
 (** [exit_span span] will exit a span. Must be called after `enter_span`. Prefer
     [with_span] instead as it has better error handling *)
-
-val otel_reporter : Logs.reporter
-(** [otel_reporter] is a reporter that can be used with {!Logs.set_reporter} to
-    send logs to the Otel backend*)
 
 (* with span funcs *)
 
@@ -106,29 +145,24 @@ val trace_data_only :
 (*****************************************************************************)
 
 val configure_tracing :
-  ?attrs:(string * user_data) list ->
-  ?env:string ->
-  ?version:string ->
-  string ->
-  Uri.t ->
-  unit
-(** [configure_tracing ~env:"prod" ~version:"v1.0.0" service_name
-    tracing_endpoint] Before instrumenting anything, configure some settings.
-    This should only be run once in a program, because it creates a backend with
-    threads, HTTP connections, etc. when called. [~env] is the environment (e.g.
-    production, staging, development). [~version] is the version of the service.
-    [service_name] is the name of the service. [~attrs] can be used to set
-    additional global attributes, which are tags that will be applied to all
-    outgoing traces/metrics/logs etc.
+  ?attrs:(string * user_data) list -> string -> Uri.t -> unit
+(** [configure_tracing service_name tracing_endpoint] Before instrumenting
+    anything, configure some settings. This should only be run once in a
+    program, because it creates a backend with threads, HTTP connections, etc.
+    when called. [service_name] is the name of the service. [~attrs] can be used
+    to set additional global attributes (such as ["service.version"]), which are
+    tags that will be applied to all outgoing traces/metrics/logs etc.
 
-    NOTE: this will set the active trace endpoint to whatever is passed. This
-    endpoint will be used when restarting tracing via [restart_tracing] *)
+    NOTE: this will set the active trace endpoint to
+    whatever is passed. This endpoint will be used when restarting tracing via
+    [restart_tracing] *)
 
-val stop_tracing : unit -> unit
-(** [stop_tracing ()] explicitly shuts down the Otel collector. If tracing has
-    been setup this MUST be called before forking (such as in {!Parmap}), or you
-    WILL experience random segfaults. This is safe to call multiple times in a
-    row. See [restart_tracing] to continue tracing after calling this.
+val stop_tracing : exit_active_spans:bool -> unit -> unit
+(** [stop_tracing ~exit_active_spans ()] explicitly shuts down the Otel
+    collector. If tracing has been setup this MUST be called before forking
+    (such as in {!Parmap}), or you WILL experience random segfaults. This is
+    safe to call multiple times in a row. See [restart_tracing] to continue
+    tracing after calling this.
 
     Example:
     {[

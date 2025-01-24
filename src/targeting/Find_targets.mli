@@ -64,6 +64,11 @@ type conf = {
   explicit_targets : Explicit_targets.t;
   (* osemgrep-only: option (see Git_project.ml and the force_root parameter) *)
   force_project_root : project_root option;
+  (* force the project to not use git or other VCS to list files.
+     The special folders '.git', '.hg', etc. may still be used to guess the
+     project root. To impose the project root as well, set
+     'force_project_root = true'. *)
+  force_novcs_project : bool;
   (* osemgrep-only: exclude scanning large files based on
       max_target_bytes, default true *)
   exclude_minified_files : bool;
@@ -94,13 +99,13 @@ val default_conf : conf
 val get_targets :
   conf ->
   Scanning_root.t list ->
-  Scanning_root.processed list * Semgrep_output_v1_t.skipped_target list
+  Fppath.t list * Core_error.t list * Semgrep_output_v1_t.skipped_target list
 
 (* Same as get_targets but drop the ppath (path within the project) *)
 val get_target_fpaths :
   conf ->
   Scanning_root.t list ->
-  Fpath.t list * Semgrep_output_v1_t.skipped_target list
+  Fpath.t list * Core_error.t list * Semgrep_output_v1_t.skipped_target list
 
 (* internals used also in Find_targets_old.ml *)
 val get_reason_for_exclusion :

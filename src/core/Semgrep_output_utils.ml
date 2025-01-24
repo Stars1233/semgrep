@@ -41,7 +41,7 @@ let first_and_last = function
  *   lines="".join(rule_match.lines).rstrip(),
  *)
 let lines_of_file_at_range (range : position * position) (file : Fpath.t) :
-    string list =
+    (string list, string) result =
   let start, end_ = range in
   UFile.lines_of_file (start.line, end_.line) file
 [@@profiling]

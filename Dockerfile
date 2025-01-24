@@ -141,9 +141,14 @@ RUN make install-deps-for-semgrep-core &&\
 ###############################################################################
 # We change container, bringing the 'semgrep-core' binary with us.
 
-#TODO: switch to 3.12 at some point
+# Start from scratch with a fresh Alpine image. We used to use
+# `python:3.11-alpine` but want to avoid shipping a bunch of unneeded Python
+# packages in our production image. Instead we'll install exactly what we need.
+#
+# TODO: Update beyond Alpine 3.19 to pick up Python versions newer than 3.11
+
 #coupling: the 'semgrep-oss' name is used in 'make build-docker'
-FROM python:3.11-alpine AS semgrep-oss
+FROM alpine:3.19 AS semgrep-oss
 
 WORKDIR /pysemgrep
 
@@ -159,7 +164,7 @@ RUN apk upgrade --no-cache && \
 #
 # history: we used to install here various utilities needed by some of our
 # scripts under scripts/. Indeed, those scripts are run from CI jobs using the
-# returntocorp/semgrep docker image as the container because they rely on semgrep
+# semgrep/semgrep docker image as the container because they rely on semgrep
 # or semgrep-core. Those scripts must also perform different
 # tasks that require utilities other than semgrep (e.g., compute parsing
 # statistics and then run 'jq' to filter the JSON). It is convenient to add
@@ -184,8 +189,10 @@ RUN apk upgrade --no-cache && \
 # - bash: many users customize their call to semgrep via bash script
 # - jq: useful to process the JSON output of semgrep
 # - curl: useful to connect to some webhooks
+# - python3: to run pysemgrep
+# - py3-setuptools: necessary runtime dependency for opentelemetry
 	git git-lfs openssh \
-	bash jq curl
+	bash jq curl python3 py3-setuptools
 
 # We just need the Python code in cli/.
 # The semgrep-core stuff would be copied from the other container
@@ -197,29 +204,21 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=true \
     PYTHONIOENCODING=utf8 \
     PYTHONUNBUFFERED=1
 
-# For some reason, using pip version 24 (the one that comes with they
-# python:3.11-alpine docker image as of June 21, 2024) will cause
-#     pip install /pysemgrep
-# below to fail because it couldn't find the wheel module, but the
-# wheel module actually exists.
-#
-# With this is workaround, without actually getting to the bottom of
-# the issue, to allow us to build semgrep docker images successfully
-# for now. If anyone understand exactly why pip version 24 fails the
-# docker build, we'd be happy to fix it at the root cause.
-# TODO: thos seems to work in the pro Dockerfile so we can probably
-# remove it now
-RUN pip install --force-reinstall -v "pip==23.3.2"
-
 # Let's now simply use 'pip' to install semgrep.
 # Note the difference between .run-deps and .build-deps below.
 # We use a single command to install packages, install semgrep, and remove
 # packages to keep a small Docker image (classic Docker trick).
 # Here is why we need the apk packages below:
 #  - build-base: ??
+#
+# Using --break-system-packages so that Semgrep is installed globally in this
+# container. Given that Alpine doesn't even ship with Python off the shelf and
+# we are installing it only to run Semgrep, the risk of unintended consequences
+# here is minimal.
+#
 # hadolint ignore=DL3013
-RUN apk add --no-cache --virtual=.build-deps build-base make &&\
-     pip install /pysemgrep &&\
+RUN apk add --no-cache --virtual=.build-deps build-base make py3-pip && \
+     pip install /pysemgrep --break-system-packages &&\
      apk del .build-deps
 
 # Get semgrep-core from step1
@@ -241,7 +240,7 @@ ENV SEMGREP_IN_DOCKER=1 \
     SEMGREP_USER_AGENT_APPEND="Docker"
 
 # The command we tell people to run for testing semgrep in Docker is
-#   docker run --rm -v "${PWD}:/src" returntocorp/semgrep semgrep --config=auto
+#   docker run --rm -v "${PWD}:/src" semgrep/semgrep semgrep --config=auto
 # (see https://semgrep.dev/docs/getting-started/ ), hence this WORKDIR directive
 WORKDIR /src
 
@@ -261,11 +260,9 @@ RUN printf "[safe]\n	directory = /src"  > ~semgrep/.gitconfig && \
 
 # Note that we just use CMD below. Why not using ENTRYPOINT ["semgrep"] ?
 # so that people can simply run
-# `docker run --rm -v "${PWD}:/src" returntocorp/semgrep --help` instead of
-# `docker run --rm -v "${PWD}:/src" returntocorp/semgrep semgrep --help`?
-# (It's even worse now that we've switched company name with
-# `docker run --rm -v "${PWD}:/src" semgrep/semgrep semgrep --help`, we now
-# have three semgrep, hmmm).
+# `docker run --rm -v "${PWD}:/src" semgrep/semgrep --help` instead of
+# `docker run --rm -v "${PWD}:/src" semgrep/semgrep semgrep --help`?
+# (Yes, that's 3 semgrep in a row, hmmm)
 #
 # This is mainly to play well with CI providers like Gitlab. Indeed,
 # gitlab CI sets up all CI jobs by first running other commands in the
@@ -297,6 +294,10 @@ LABEL maintainer="support@semgrep.com"
 #coupling: the 'semgrep-cli' name is used in release.jsonnet
 FROM semgrep-oss AS semgrep-cli
 
+# Expects to find a secret named SEMGREP_APP_TOKEN in Github Actions. To run
+# locally, set the SEMGREP_APP_TOKEN environment variable and then run:
+#
+# $ docker build --secret id=SEMGREP_APP_TOKEN ...
 RUN --mount=type=secret,id=SEMGREP_APP_TOKEN SEMGREP_APP_TOKEN=$(cat /run/secrets/SEMGREP_APP_TOKEN) semgrep install-semgrep-pro --debug
 
 # Clear out any detritus from the pro install (especially credentials)
@@ -311,7 +312,7 @@ RUN rm -rf /root/.semgrep
 # We can't make this the default in the semgrep-cli stage above because of
 # permissions errors on the mounted volume when using instructions for running
 # semgrep with docker:
-#   `docker run -v "${PWD}:/src" -i returntocorp/semgrep semgrep`
+#   `docker run -v "${PWD}:/src" -i semgrep/semgrep semgrep`
 
 #coupling: the 'nonroot' name is used in release.jsonnet
 FROM semgrep-cli AS nonroot

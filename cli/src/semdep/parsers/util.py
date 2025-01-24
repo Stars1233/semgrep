@@ -30,6 +30,7 @@ from typing import TypeVar
 
 from ruamel.yaml import YAMLError
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import alt
 from semdep.external.parsy import fail
 from semdep.external.parsy import line_info
@@ -88,7 +89,11 @@ def to_parser(parser: LegacySemgrepParser, parser_type: ScaParserName) -> Semgre
             console.print(f"Failed to parse {lockfile_path} with exception {e}")
             return (
                 [],
-                [DependencyParserError(str(lockfile_path), parser_type, str(e))],
+                [
+                    DependencyParserError(
+                        out.Fpath(str(lockfile_path)), parser_type, str(e)
+                    )
+                ],
             )
 
     return wrapped_parser
@@ -287,6 +292,12 @@ def parse_dependency_file(
     text = file_to_parse.path.read_text(errors="replace")
     text = file_to_parse.preprocessor(text)
 
+    if not text.strip():
+        reason = f"{file_to_parse.path} is unexpectedly empty."
+        return DependencyParserError(
+            out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
+        )
+
     try:
         if isinstance(file_to_parse.parser, Parser):
             return file_to_parse.parser.parse(text)
@@ -295,12 +306,12 @@ def parse_dependency_file(
 
     except YAMLError as e:
         return DependencyParserError(
-            file_to_parse.path.name, file_to_parse.parser_name, str(e)
+            out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
         )
     except RecursionError:
         reason = "Python recursion depth exceeded, try again with SEMGREP_PYTHON_RECURSION_LIMIT_INCREASE set higher than 500"
         return DependencyParserError(
-            str(file_to_parse.path), file_to_parse.parser_name, reason
+            out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
         )
     except ParseError as e:
         # These are zero indexed but most editors are one indexed
@@ -313,17 +324,24 @@ def parse_dependency_file(
         if line < len(text_lines):
             offending_line = text_lines[line]
             return DependencyParserError(
-                str(file_to_parse.path),
+                out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 error_str,
                 line + 1,
                 col + 1,
                 offending_line,
             )
+        elif line == 0 and col == 0:
+            reason = (
+                f"Parser failed at the beginning of {file_to_parse.path}.\n{error_str}"
+            )
+            return DependencyParserError(
+                out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
+            )
         else:
             reason = f"{error_str}\nInternal Error - line {line + 1} is past the end of {file_to_parse.path}?"
             return DependencyParserError(
-                str(file_to_parse.path),
+                out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 reason,
                 line + 1,
@@ -331,7 +349,7 @@ def parse_dependency_file(
             )
     except Exception as e:
         return DependencyParserError(
-            file_to_parse.path.name, file_to_parse.parser_name, str(e)
+            out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
         )
 
 

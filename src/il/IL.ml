@@ -1,7 +1,6 @@
-(* Yoann Padioleau
- * Iago Abal
+(* Yoann Padioleau, Iago Abal
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -108,6 +107,13 @@ type ident = G.ident [@@deriving show]
 type name = { ident : ident; sid : G.sid; id_info : G.id_info }
 [@@deriving show]
 
+let str_of_name name = Common.spf "%s:%s" (fst name.ident) (G.SId.show name.sid)
+
+let equal_name name1 name2 =
+  let { ident = str1, _tok1; sid = sid1; id_info = _ } = name1 in
+  let { ident = str2, _tok2; sid = sid2; id_info = _ } = name2 in
+  G.SId.equal sid1 sid2 && String.equal str1 str2
+
 let compare_name name1 name2 =
   let { ident = str1, _tok1; sid = sid1; id_info = _ } = name1 in
   let { ident = str2, _tok2; sid = sid2; id_info = _ } = name2 in
@@ -119,6 +125,19 @@ module NameOrdered = struct
   type t = name
 
   let compare = compare_name
+end
+
+module NameSet : sig
+  include Set.S with type elt = name
+
+  val show : t -> string
+end = struct
+  include Set.Make (NameOrdered)
+
+  let show nameset =
+    "{"
+    ^ (nameset |> elements |> List_.map str_of_name |> String.concat ", ")
+    ^ "}"
 end
 
 module NameMap = Map.Make (NameOrdered)
@@ -321,7 +340,7 @@ and exp_kind =
       * exp (* partial translation *) option
 
 and field_or_entry =
-  | Field of ident * exp  (** struct field *)
+  | Field of name * exp  (** struct field *)
   | Entry of exp * exp  (** dictionary entry, key and value *)
   | Spread of exp
 
@@ -493,7 +512,7 @@ type any = L of lval | E of exp | I of instr | S of stmt | Ss of stmt list
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
-let str_of_name name = Common.spf "%s:%s" (fst name.ident) (G.SId.show name.sid)
+
 let ident_str_of_name name = fst name.ident
 let str_of_label ((n, _), _) = n
 

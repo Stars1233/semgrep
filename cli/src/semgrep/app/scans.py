@@ -3,7 +3,6 @@ import json
 import os
 import sys
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import List
 from typing import Optional
 from typing import Set
 from typing import TYPE_CHECKING
+from typing import Union
 
 import click
 import requests
@@ -33,21 +33,16 @@ from semgrep.parsing_data import ParsingData
 from semgrep.rule import Rule
 from semgrep.rule_match import RuleMatchMap
 from semgrep.state import get_state
+from semgrep.subproject import ResolvedSubproject
+from semgrep.subproject import UnresolvedSubproject
 from semgrep.target_manager import ALL_PRODUCTS
 from semgrep.verbose_logging import getLogger
+
 
 if TYPE_CHECKING:
     from semgrep.engine import EngineType
     from rich.progress import Progress
-
 logger = getLogger(__name__)
-
-
-@dataclass
-class ScanCompleteResult:
-    success: bool
-    app_block_override: bool
-    app_block_reason: str
 
 
 class ScanHandler:
@@ -63,12 +58,12 @@ class ScanHandler:
         """
         state = get_state()
         self.local_id = str(state.local_scan_id)
-        self.sms_scan_id = str(state.env.sms_scan_id)
         self.scan_metadata = out.ScanMetadata(
             cli_version=out.Version(__VERSION__),
             unique_id=out.Uuid(self.local_id),
             requested_products=[],
             dry_run=dry_run,
+            sms_scan_id=state.env.sms_scan_id,
         )
         self.scan_response: Optional[out.ScanResponse] = None
         self.dry_run = dry_run
@@ -128,7 +123,20 @@ class ScanHandler:
         return False
 
     @property
-    def prioritize_dependency_graph_generation(self) -> bool:
+    def resolve_all_deps_in_diff_scan(self) -> bool:
+        """
+        Normally, diff scans will resolve only the dependencies that are relevant to the changes
+        in the diff. If this flag is set, a diff scan will resolve all dependencies and include
+        the in the response to the app.
+
+        Separate property for easy of mocking in test
+        """
+        if self.scan_response:
+            return self.scan_response.engine_params.scan_all_deps_in_diff_scan
+        return True
+
+    @property
+    def ptt_enabled(self) -> bool:
         """
         Separate property for easy of mocking in test
 
@@ -243,15 +251,7 @@ class ScanHandler:
         returns ignored list
         """
         state = get_state()
-        if self.sms_scan_id:
-            logger.debug(f"SMS scan id: {self.sms_scan_id}")
         request = out.ScanRequest(
-            meta=out.RawJson(
-                {
-                    **project_metadata.to_json(),
-                    **project_config.to_CiConfigFromRepo().to_json(),
-                }
-            ),
             scan_metadata=self.scan_metadata,
             project_metadata=project_metadata,
             project_config=project_config.to_CiConfigFromRepo(),
@@ -292,13 +292,8 @@ class ScanHandler:
         logger.debug(f"Scan started: {json.dumps(x.to_json(), indent=4)}")
         x.config.rules = save
 
-        current_span = otel_trace.get_current_span()
-        if self.scan_id:
-            current_span.set_attribute("semgrep.scan_id", self.scan_id)
-        if self.deployment_id:
-            current_span.set_attribute("semgrep.deployment_id", self.deployment_id)
-        if self.deployment_name:
-            current_span.set_attribute("semgrep.deployment_name", self.deployment_name)
+        otel_trace.get_current_span()
+        get_state().traces.set_scan_info(self.scan_response.info)
 
     def report_failure(self, exit_code: int) -> None:
         """
@@ -348,10 +343,11 @@ class ScanHandler:
         commit_date: str,
         lockfile_dependencies: Dict[str, List[out.FoundDependency]],
         dependency_parser_errors: List[DependencyParserError],
+        all_subprojects: List[Union[UnresolvedSubproject, ResolvedSubproject]],
         contributions: out.Contributions,
         engine_requested: "EngineType",
         progress_bar: "Progress",
-    ) -> ScanCompleteResult:
+    ) -> out.CiScanCompleteResponse:
         """
         commit_date here for legacy reasons. epoch time of latest commit
 
@@ -461,6 +457,11 @@ class ScanHandler:
             name = USER_FRIENDLY_PRODUCT_NAMES.get(r.product, r.product.to_json())
             findings_by_product[f"{name}"] += len(f)
 
+        subproject_stats: List[out.SubprojectStats] = []
+        if all_subprojects:
+            for subproject in all_subprojects:
+                subproject_stats.append(subproject.to_stats_output())
+
         complete = out.CiScanComplete(
             exit_code=cli_suggested_exit_code,
             dependency_parser_errors=dependency_parser_errors,
@@ -483,6 +484,7 @@ class ScanHandler:
                 },
                 engine_requested=engine_requested.name,
                 findings_by_product=findings_by_product,
+                supply_chain_stats=out.SupplyChainStats(subproject_stats),
             ),
         )
 
@@ -500,7 +502,7 @@ class ScanHandler:
             logger.info(
                 f"Would have sent complete blob: {json.dumps(complete.to_json(), indent=4)}"
             )
-            return ScanCompleteResult(True, False, "")
+            return out.CiScanCompleteResponse(success=True)
 
         # old: was also logging {json.dumps(findings_and_ignores, indent=4)}
         # alt: save it in ~/.semgrep/logs/findings_and_ignores.json?
@@ -562,16 +564,11 @@ class ScanHandler:
                     f"API server at {state.env.semgrep_url} returned this error: {response.text}"
                 )
 
-            ret = response.json()
-            success = ret.get("success", False)
+            ret = out.CiScanCompleteResponse.from_json(response.json())
+            success = ret.success
 
             if success or complete.final_attempt:
                 progress_bar.update(complete_task, completed=100)
-                return ScanCompleteResult(
-                    success,
-                    bool(ret.get("app_block_override", False)),
-                    ret.get("app_block_reason", ""),
-                )
-
+                return ret
             progress_bar.advance(complete_task)
             sleep(5 if datetime.now().replace(tzinfo=None) < slow_down_after else 30)

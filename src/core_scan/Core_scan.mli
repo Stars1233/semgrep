@@ -1,8 +1,6 @@
 (* The type of the semgrep "core" scan. We define it here so that
    semgrep and semgrep-proprietary use the same definition *)
 type func = Core_scan_config.t -> Core_result.result_or_exn
-
-(* alias to avoid repeating ourselves in many callers *)
 type caps = < Cap.fork ; Cap.time_limit ; Cap.memory_limit >
 
 (* Entry point. This is used in Core_CLI.ml for semgrep-core,
@@ -28,32 +26,41 @@ type caps = < Cap.fork ; Cap.time_limit ; Cap.memory_limit >
  * or UConsole. In theory, scan() can be completely pure.
  *
  * We require Cap.fork for Parmap.
- * We require Cap.alarm for timeout in Check_rules().
+ * We require Cap.time_limit for timeout in Check_rules().
  *
  * The scan function has the type [func] defined above.
  *
  * Note that this function will run the pre/post scan hook defined
  * in Pre_post_core_scan.hook_processor.
  *)
-val scan : caps -> Core_scan_config.t -> Core_result.result_or_exn
+val scan : < caps ; .. > -> Core_scan_config.t -> Core_result.result_or_exn
 
 (*****************************************************************************)
 (* Utilities functions used in tests or semgrep-pro *)
 (*****************************************************************************)
 
-val targets_of_config :
-  Core_scan_config.t -> Target.t list * Semgrep_output_v1_t.skipped_target list
-(**
+(*
    Compute the set of targets, either by reading what was passed
    in -target, or passed explicitly in Core_scan_config.Targets.
-*)
 
-val rules_of_config :
-  filter_by_targets:bool -> Core_scan_config.t -> Rule_error.rules_and_invalid
-(** Get the rules
- *  if filter_by_targets is true (default false): use targeting info in config
- *  to filter irrelevant rules.
- *)
+   The rules are required to associate analyzers (language specified
+   in the rule) with target paths. This is for compatibility with
+   the legacy pysemgrep/semgrep-core interface where a target path
+   is associated with an analyzer or language as reflected by the
+   Target.t type.
+*)
+val targets_of_config :
+  Core_scan_config.t ->
+  Rule.t list ->
+  Target.t list * Core_error.t list * Semgrep_output_v1_t.skipped_target list
+
+(* Get the rules *)
+val rules_of_config : Core_scan_config.t -> Rule_error.rules_and_invalid
+
+(* Get the rules, using targeting info in config to filter irrelevant rules.
+   TODO: See comments in the .ml about the implementation *)
+val applicable_rules_of_config :
+  Core_scan_config.t -> Rule_error.rules_and_invalid
 
 (* This is also used by semgrep-proprietary. It filters the rules that
    apply to a given target file for a given analyzer.
@@ -61,7 +68,7 @@ val rules_of_config :
    and the per-rule include/exclude patterns; possibly more in the future.
 *)
 val rules_for_target :
-  analyzer:Xlang.t ->
+  analyzer:Analyzer.t ->
   products:Semgrep_output_v1_t.product list ->
   origin:Origin.t ->
   respect_rule_paths:bool ->
@@ -72,7 +79,15 @@ val rules_for_target :
    Compare to select_applicable_rules_for_target which additionally can
    honor per-rule include/exclude patterns based on the target path.
 *)
-val rules_for_analyzer : analyzer:Xlang.t -> Rule.t list -> Rule.t list
+val rules_for_analyzer : analyzer:Analyzer.t -> Rule.t list -> Rule.t list
+
+(* for SCA_scan *)
+val rules_for_origin : Rule.paths option -> Origin.t -> bool
+
+val set_matches_to_proprietary_origin_if_needed :
+  Xtarget.t ->
+  Core_result.matches_single_file ->
+  Core_result.matches_single_file
 
 (* This function prints a dot, which is consumed by pysemgrep to update
    the progress bar if the output_format is Json true.
@@ -88,6 +103,14 @@ val print_cli_progress : Core_scan_config.t -> unit
 val print_cli_additional_targets : Core_scan_config.t -> int -> unit
 
 type target_handler = Target.t -> Core_result.matches_single_file * bool
+
+val mk_target_handler_hook :
+  (< Cap.time_limit > ->
+  Core_scan_config.t ->
+  Rule.t list ->
+  Match_env.prefilter_config ->
+  target_handler)
+  Hook.t
 
 val iter_targets_and_get_matches_and_exn_to_errors :
   < Cap.fork ; Cap.memory_limit > ->
@@ -111,10 +134,11 @@ val parse_and_resolve_name :
 
 val log_scan_inputs :
   Core_scan_config.t ->
-  targets:'a list ->
-  skipped:'b list ->
-  valid_rules:'c list ->
-  invalid_rules:'d list ->
+  targets:_ list ->
+  errors:_ list ->
+  skipped:_ list ->
+  valid_rules:_ list ->
+  invalid_rules:_ list ->
   unit
 
 val log_scan_results :

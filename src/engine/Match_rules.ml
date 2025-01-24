@@ -15,7 +15,7 @@
 open Common
 open Fpath_.Operators
 module R = Rule
-module PM = Pattern_match
+module PM = Core_match
 module RP = Core_result
 module E = Core_error
 module OutJ = Semgrep_output_v1_t
@@ -103,7 +103,9 @@ let group_rules xconf rules xtarget =
            | _ when not relevant_rule -> Right3 r
            | `Taint _ as mode -> Left3 { r with mode }
            | (`Extract _ | `Search _) as mode -> Middle3 { r with mode }
-           | `SCA _ -> failwith "SCA rule not available in core."
+           | `SCA _ ->
+               (* alt: failwith "SCA rule not available in core." *)
+               Right3 r
            | `Steps _ ->
                Log.warn (fun m ->
                    m "Step rule not handled: %s" (Rule.show_rule r));
@@ -160,47 +162,25 @@ let per_rule_boilerplate_fn (timeout : timeout_config option) =
           (Core_error.ErrorSet.singleton error)
           (Core_profiling.empty_rule_profiling rule)
 
-let scc_match_hook (match_hook : PM.t -> unit)
-    (dependency_match_table : Match_dependency.dependency_match_table option) :
-    PM.t list -> PM.t list =
-  let get_dep_matches =
-    match dependency_match_table with
-    | Some table -> Hashtbl.find_opt table
-    | None -> fun _ -> None
-  in
-  fun pms ->
-    pms
-    |> List.concat_map (fun (pm : Pattern_match.t) ->
-           let dependency_matches = get_dep_matches pm.rule_id.id in
-           let pms' =
-             Match_dependency.annotate_pattern_match dependency_matches pm
-           in
-           pms' |> List.iter match_hook;
-           pms')
-
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-let check
-    ?(dependency_match_table : Match_dependency.dependency_match_table option)
-    ~match_hook ~(timeout : timeout_config option) (xconf : Match_env.xconfig)
-    (rules : Rule.rules) (xtarget : Xtarget.t) : Core_result.matches_single_file
-    =
-  let match_hook = scc_match_hook match_hook dependency_match_table in
-
+let check ~matches_hook ~(timeout : timeout_config option)
+    (xconf : Match_env.xconfig) (rules : Rule.rules) (xtarget : Xtarget.t) :
+    Core_result.matches_single_file =
   let {
     path = { internal_path_to_content = file; _ };
     lazy_ast_and_errors;
-    xlang;
+    analyzer;
     _;
   } : Xtarget.t =
     xtarget
   in
   Log.info (fun m -> m "checking %s with %d rules" !!file (List.length rules));
-  (match (!Profiling.profile, xlang) with
+  (match (!Profiling.profile, analyzer) with
   (* coupling: see Run_semgrep.xtarget_of_file() *)
-  | Profiling.ProfAll, Xlang.L (_lang, []) ->
+  | Profiling.ProfAll, Analyzer.L (_lang, []) ->
       Log.debug (fun m ->
           m "forcing parsing of AST outside of rules, for better profile");
       Lazy.force lazy_ast_and_errors |> ignore
@@ -222,8 +202,8 @@ let check
   let res_taint_rules =
     taint_rules_groups
     |> List.concat_map (fun taint_rules ->
-           Match_tainting_mode.check_rules ~match_hook ~per_rule_boilerplate_fn
-             taint_rules xconf xtarget)
+           Match_tainting_mode.check_rules ~matches_hook
+             ~per_rule_boilerplate_fn taint_rules xconf xtarget)
   in
   let res_nontaint_rules =
     nontaint_rules
@@ -242,12 +222,12 @@ let check
                    (* dispatching *)
                    match r.R.mode with
                    | `Search _ as mode ->
-                       Match_search_mode.check_rule { r with mode } match_hook
-                         xconf xtarget
+                       Match_search_mode.check_rule { r with mode }
+                         ~matches_hook xconf xtarget
                    | `Extract extract_spec ->
                        Match_search_mode.check_rule
                          { r with mode = `Search extract_spec.R.formula }
-                         match_hook xconf xtarget
+                         ~matches_hook xconf xtarget
                    | `Steps _ -> raise Multistep_rules_not_available)))
   in
   let res_total = res_taint_rules @ res_nontaint_rules in

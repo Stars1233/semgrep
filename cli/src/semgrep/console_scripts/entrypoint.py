@@ -32,6 +32,7 @@ import os
 import platform
 import shutil
 import sys
+import sysconfig
 import warnings
 
 # alt: you can also add '-W ignore::DeprecationWarning' after the python3 above,
@@ -50,7 +51,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # nosem: no-env-vars-on-top-level
 PATH = os.environ.get("PATH", "")
 # nosem: no-env-vars-on-top-level
-os.environ["PATH"] = PATH + os.pathsep + os.path.dirname(os.path.abspath(__file__))
+os.environ["PATH"] = PATH + os.pathsep + sysconfig.get_path("scripts")
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -148,10 +149,7 @@ def exec_pysemgrep():
 # they'll get the old behavior.
 def exec_osemgrep():
     argv = sys.argv
-    if (
-        any(pro_flag in argv for pro_flag in PRO_FLAGS)
-        or "--beta-testing-secrets-enabled" in argv
-    ):
+    if any(pro_flag in argv for pro_flag in PRO_FLAGS):
         try:
             path = find_semgrep_core_path(
                 pro=True,

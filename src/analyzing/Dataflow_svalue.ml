@@ -45,8 +45,8 @@ end)
 (* Hooks *)
 (*****************************************************************************)
 
-let hook_constness_of_function = ref None
-let hook_transfer_of_assume = ref None
+let hook_constness_of_function = Hook.create None
+let hook_transfer_of_assume = Hook.create None
 
 (*****************************************************************************)
 (* Constness *)
@@ -109,7 +109,7 @@ let result_of_function_call_constant lang f args =
       Some (G.Cst G.Cstr)
   (* Pro/Interfile: Look up inferred constness of the function *)
   | _lang, { e = Fetch _; eorig = SameAs eorig }, _args -> (
-      match !hook_constness_of_function with
+      match Hook.get hook_constness_of_function with
       | Some constness_of_func -> (
           match constness_of_func eorig with
           | Some G.NotCst
@@ -144,7 +144,8 @@ let rec is_symbolic_expr expr =
   | G.New (_, _, _, args) ->
       let args = Tok.unbracket args in
       List.for_all is_symbolic_arg args
-  | _else -> false
+  | G.Record (_, fields, _) -> List.for_all is_symbolic_field fields
+  | __else__ -> false
 
 and is_symbolic_arg arg =
   match arg with
@@ -154,6 +155,18 @@ and is_symbolic_arg arg =
       is_symbolic_expr e
   | G.ArgType _ -> true
   | G.OtherArg _ -> false
+
+and is_symbolic_field field =
+  match field with
+  | G.F
+      {
+        s =
+          G.DefStmt
+            ({ name = G.EN _; _ }, G.FieldDefColon { vinit = Some expr; _ });
+        _;
+      } ->
+      is_symbolic_expr expr
+  | __else__ -> false
 
 let sym_prop eorig =
   match eorig with
@@ -303,7 +316,7 @@ let update_env_with env var sval =
 (* Semgrep Pro *)
 let transfer_of_assume (assume : bool) (cond : IL.exp_kind)
     (inp : G.svalue Var_env.t) : G.svalue Var_env.t =
-  match !hook_transfer_of_assume with
+  match Hook.get hook_transfer_of_assume with
   | None -> inp
   | Some hook -> hook assume cond inp
 

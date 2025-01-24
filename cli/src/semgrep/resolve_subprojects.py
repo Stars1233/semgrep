@@ -2,222 +2,25 @@ from pathlib import Path
 from typing import Dict
 from typing import FrozenSet
 from typing import List
-from typing import Optional
-from typing import Sequence
 from typing import Set
 from typing import Tuple
-from typing import Union
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
-from semdep.parsers.cargo import parse_cargo
-from semdep.parsers.composer import parse_composer_lock
-from semdep.parsers.gem import parse_gemfile
-from semdep.parsers.go_mod import parse_go_mod
-from semdep.parsers.gradle import parse_gradle
-from semdep.parsers.mix import parse_mix
-from semdep.parsers.package_lock import parse_package_lock
-from semdep.parsers.packages_lock_c_sharp import (
-    parse_packages_lock as parse_packages_lock_c_sharp,
-)
-from semdep.parsers.pipfile import parse_pipfile
-from semdep.parsers.pnpm import parse_pnpm
-from semdep.parsers.poetry import parse_poetry
-from semdep.parsers.pom_tree import parse_pom_tree
-from semdep.parsers.pubspec_lock import parse_pubspec_lock
-from semdep.parsers.requirements import parse_requirements
-from semdep.parsers.swiftpm import parse_package_resolved
-from semdep.parsers.util import DependencyParserError
-from semdep.parsers.util import SemgrepParser
-from semdep.parsers.util import to_parser
-from semdep.parsers.yarn import parse_yarn
 from semdep.subproject_matchers import MATCHERS
 from semdep.subproject_matchers import SubprojectMatcher
-from semgrep.error import DependencyResolutionError
-from semgrep.rpc_call import resolve_dependencies
-from semgrep.semgrep_interfaces.semgrep_output_v1 import CargoParser
-from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyParserError
+from semgrep.resolve_dependency_source import resolve_dependency_source
+from semgrep.rule import Rule
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
-from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
-from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
-from semgrep.subproject import DependencySource
-from semgrep.subproject import LockfileDependencySource
-from semgrep.subproject import ManifestOnlyDependencySource
-from semgrep.subproject import MultiLockfileDependencySource
-from semgrep.subproject import PackageManagerType
-from semgrep.subproject import ResolutionMethod
+from semgrep.semgrep_types import Language
+from semgrep.subproject import find_closest_subproject
 from semgrep.subproject import ResolvedSubproject
 from semgrep.subproject import Subproject
+from semgrep.subproject import UnresolvedReason
 from semgrep.subproject import UnresolvedSubproject
 from semgrep.target_manager import TargetManager
 from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
-
-# argument order is lockfile path, manifest path
-PARSERS_BY_PACKAGE_MANAGER_TYPE: Dict[PackageManagerType, SemgrepParser] = {
-    PackageManagerType.PIPENV: parse_pipfile,
-    PackageManagerType.PIP: parse_requirements,
-    PackageManagerType.POETRY: parse_poetry,
-    PackageManagerType.NPM: parse_package_lock,
-    PackageManagerType.YARN: parse_yarn,
-    PackageManagerType.PNPM: parse_pnpm,
-    PackageManagerType.RUBY_GEM: parse_gemfile,
-    PackageManagerType.COMPOSER: parse_composer_lock,
-    PackageManagerType.GO_MOD: parse_go_mod,
-    PackageManagerType.CARGO: to_parser(parse_cargo, ScaParserName(CargoParser())),
-    PackageManagerType.MAVEN: parse_pom_tree,
-    PackageManagerType.GRADLE: parse_gradle,
-    PackageManagerType.NUGET: parse_packages_lock_c_sharp,
-    PackageManagerType.DART_PUB: parse_pubspec_lock,
-    PackageManagerType.SWIFT_PM: parse_package_resolved,
-    PackageManagerType.ELIXIR_HEX: parse_mix,
-}
-
-ECOSYSTEM_BY_PACKAGE_MANAGER_TYPE: Dict[PackageManagerType, Ecosystem] = {
-    PackageManagerType.PIPENV: Ecosystem(out.Pypi()),
-    PackageManagerType.PIP: Ecosystem(out.Pypi()),
-    PackageManagerType.POETRY: Ecosystem(out.Pypi()),
-    PackageManagerType.NPM: Ecosystem(out.Npm()),
-    PackageManagerType.YARN: Ecosystem(out.Npm()),
-    PackageManagerType.PNPM: Ecosystem(out.Npm()),
-    PackageManagerType.RUBY_GEM: Ecosystem(out.Gem()),
-    PackageManagerType.COMPOSER: Ecosystem(out.Composer()),
-    PackageManagerType.GO_MOD: Ecosystem(out.Gomod()),
-    PackageManagerType.CARGO: Ecosystem(out.Cargo()),
-    PackageManagerType.MAVEN: Ecosystem(out.Maven()),
-    PackageManagerType.GRADLE: Ecosystem(out.Maven()),
-    PackageManagerType.NUGET: Ecosystem(out.Nuget()),
-    PackageManagerType.DART_PUB: Ecosystem(out.Pub()),
-    PackageManagerType.SWIFT_PM: Ecosystem(out.SwiftPM()),
-    PackageManagerType.ELIXIR_HEX: Ecosystem(out.Mix()),
-}
-
-DEPENDENCY_GRAPH_SUPPORTED_MANIFEST_KINDS = [
-    out.ManifestKind(out.PomXml()),
-    out.ManifestKind(out.BuildGradle()),
-]
-
-
-def _resolve_dependencies_dynamically(
-    manifest_path: Path, manifest_kind: out.ManifestKind
-) -> Tuple[
-    Optional[Ecosystem],
-    List[FoundDependency],
-    Sequence[Union[DependencyParserError, DependencyResolutionError]],
-    List[Path],
-]:
-    """
-    Handle the RPC call to resolve dependencies dynamically.
-    """
-    manifest_arg = out.Manifest(kind=manifest_kind, path=out.Fpath(str(manifest_path)))
-    response = resolve_dependencies([manifest_arg])
-    if response is None:
-        # we failed to resolve somehow
-        # TODO: handle this and generate an error
-        return (None, [], [], [])
-    if len(response) > 1:
-        logger.warning(
-            f"Too many responses from dynamic dependency resolution RPC. Expected 1, got {len(response)}"
-        )
-    result = response[0][1]
-    if isinstance(result.value, out.ResolutionOk):
-        resolved_deps = result.value.value
-        # right now we only support lockfileless for the maven ecosystem, so hardcode that here
-        # TODO: move this ecosystem identification into the ocaml code when we redo the interface there
-        ecosystem = Ecosystem(out.Maven())
-        return ecosystem, resolved_deps, [], [manifest_path]
-    else:
-        # some error occured in resolution, track it
-        error = DependencyResolutionError(
-            type_=result.value.value,
-            dependency_source_file=manifest_path,
-        )
-        return (None, [], [error], [])
-
-
-def _resolve_dependency_source(
-    dep_source: DependencySource,
-    enable_dynamic_resolution: bool = True,
-    prioritize_dependency_graph_generation: bool = False,
-) -> Tuple[
-    Optional[Ecosystem],
-    List[FoundDependency],
-    Sequence[Union[DependencyParserError, DependencyResolutionError]],
-    List[Path],
-]:
-    """
-    Resolve the dependencies in the dependency source. Returns:
-    - The ecosystem the resulting dependencies belong to. If there are no dependencies, this value is None
-    - The list of FoundDependency objects that were resolved
-    - The list of dependency parser errors encountered
-    - The list of paths that should be considered dependency targets
-    """
-    ecosystem: Optional[Ecosystem] = None
-
-    if isinstance(dep_source, LockfileDependencySource):
-        parser = PARSERS_BY_PACKAGE_MANAGER_TYPE[dep_source.package_manager_type]
-        ecosystem = ECOSYSTEM_BY_PACKAGE_MANAGER_TYPE[dep_source.package_manager_type]
-        manifest_path = (
-            Path(dep_source.manifest.path.value)
-            if dep_source.manifest is not None
-            else None
-        )
-        manifest_kind = (
-            dep_source.manifest.kind if dep_source.manifest is not None else None
-        )
-        if (
-            enable_dynamic_resolution
-            and prioritize_dependency_graph_generation
-            and manifest_path is not None
-            and manifest_kind is not None
-            and manifest_kind in DEPENDENCY_GRAPH_SUPPORTED_MANIFEST_KINDS
-        ):
-            (
-                ecosystem,
-                new_deps,
-                new_errors,
-                new_targets,
-            ) = _resolve_dependencies_dynamically(manifest_path, manifest_kind)
-            if ecosystem is not None:
-                # TODO: Reimplement this once more robust error handling for lockfileless resolution is implemented
-                return ecosystem, new_deps, new_errors, new_targets
-            else:
-                # dynamic resolution failed, fall back to lockfile parsing
-                resolved_deps, parse_errors = parser(
-                    dep_source.lockfile_path, manifest_path
-                )
-            return ecosystem, resolved_deps, parse_errors, [dep_source.lockfile_path]
-        else:
-            resolved_deps, parse_errors = parser(
-                dep_source.lockfile_path, manifest_path
-            )
-            return ecosystem, resolved_deps, parse_errors, [dep_source.lockfile_path]
-    elif isinstance(dep_source, MultiLockfileDependencySource):
-        all_resolved_deps: List[FoundDependency] = []
-        all_parse_errors: List[
-            Union[DependencyParserError, DependencyResolutionError]
-        ] = []
-        all_dep_targets: List[Path] = []
-
-        for lockfile_source in dep_source.sources:
-            ecosystem, new_deps, new_errors, new_targets = _resolve_dependency_source(
-                lockfile_source
-            )
-            all_resolved_deps.extend(new_deps)
-            all_parse_errors.extend(new_errors)
-            all_dep_targets.extend(new_targets)
-
-        return ecosystem, all_resolved_deps, all_parse_errors, all_dep_targets
-    elif (
-        isinstance(dep_source, ManifestOnlyDependencySource)
-        and enable_dynamic_resolution
-    ):
-        return _resolve_dependencies_dynamically(
-            dep_source.manifest_path, dep_source.manifest_kind
-        )
-    else:
-        # dependency source type is not supported, do nothing
-        return (None, [], [], [])
 
 
 def find_subprojects(
@@ -240,58 +43,163 @@ def find_subprojects(
     return unresolved_subprojects
 
 
+def filter_changed_subprojects(
+    target_manager: TargetManager,
+    dependency_aware_rules: List[Rule],
+    subprojects: List[Subproject],
+) -> Tuple[List[Subproject], List[UnresolvedSubproject]]:
+    """
+    Partition subprojects into those that are relevant for the targets in `target_manager` and those that are not.
+    This allows skipping resolution of unchanged subprojects in diff scans.
+
+    Marks irrelevant subprojects' unresolved reason as "skipped".
+
+    Note that the logic used here to determine changed subprojects must be consistent with the logic used at
+    finding-generation time in `dependency_aware_rule.py` to associate code files with subproject. If we do not
+    resolve a subproject because it is deemed irrelevant in this function, we will not consider that subproject
+    when generating findings.
+    """
+    relevant_subprojects: Set[Subproject] = set()
+
+    # first, mark any subprojects whose dependency source files were directly modified as relevant
+    all_dependency_source_targets = target_manager.get_all_dependency_source_files(
+        ignore_baseline_handler=False
+    )
+    for subproject in subprojects:
+        source_file_set = set(subproject.dependency_source.get_all_source_files())
+        if len(all_dependency_source_targets.intersection(source_file_set)) > 0:
+            # one of the source files for this subproject changed, so we should keep it
+            relevant_subprojects.add(subproject)
+
+    if len(relevant_subprojects) == len(subprojects):
+        # all subproject are already relevant, so there is no need to look at code files
+        # (this should cover the full scan case and prevent extra work)
+        # need to refer to the original list for deterministic ordering
+        return [s for s in subprojects if s in relevant_subprojects], []
+
+    # make language -> ecosystem mapping from the rules that we are given
+    ecosystems_by_language: Dict[Language, List[Ecosystem]] = {}
+    for rule in dependency_aware_rules:
+        for language in rule.languages:
+            if language not in ecosystems_by_language:
+                ecosystems_by_language[language] = []
+            for ecosystem in rule.ecosystems:
+                # inefficient lookup, but we need to use a list rather than a set to preserve order and
+                # the number of ecsosytems per language is small (<10)
+                if ecosystem not in ecosystems_by_language[language]:
+                    ecosystems_by_language[language].append(ecosystem)
+
+    # note that this logic re-implements the logic in `dependency_aware_rule.py`
+    for language, ecosystems in ecosystems_by_language.items():
+        for code_file in target_manager.get_files_for_language(
+            language, out.Product
+        ).kept:
+            # there may be multiple ecosystems for a single language, and the finding-generation
+            # logic will find a different closest subproject for each one. So we need to mark
+            # the closest subproject for each relevant ecosystem as potentially changed
+            for ecosystem in ecosystems:
+                # This is nonderministic need to fix
+                closest_subproject = find_closest_subproject(
+                    code_file, ecosystem, subprojects
+                )
+                if closest_subproject is not None:
+                    relevant_subprojects.add(closest_subproject)
+
+    # we refer to the original list for ordering, ensuring that the output order
+    # is deterministic.
+    ordered_relevant = [s for s in subprojects if s in relevant_subprojects]
+    ordered_irrelevant = [s for s in subprojects if s not in relevant_subprojects]
+    unresolved_subprojects = [
+        UnresolvedSubproject.from_subproject(s, UnresolvedReason.SKIPPED, [])
+        for s in ordered_irrelevant
+    ]
+    return ordered_relevant, unresolved_subprojects
+
+
 def resolve_subprojects(
     target_manager: TargetManager,
+    dependency_aware_rules: List[Rule],
     allow_dynamic_resolution: bool = False,
-    prioritize_dependency_graph_generation: bool = False,
+    ptt_enabled: bool = False,
+    resolve_untargeted_subprojects: bool = False,
 ) -> Tuple[
     List[UnresolvedSubproject], Dict[Ecosystem, List[ResolvedSubproject]], List[Path]
 ]:
     """
-    Identify lockfiles and manifest files to resolve dependency information from the environment
+    Identify subprojects based on lockfiles and manifests and resolve their dependency information.
 
+    When `allow_dynamic_resolution` is False, dependencies are resolved only by parsing existing files (lockfiles and manifests).
     If `allow_dynamic_resolution` is True, this function may cause projects that are scanned to be built. This may involve:
     - Downloading packages from the internet
     - Executing code that is included in the scanned project or in downloaded packages
 
-    When `allow_dynamic_resolution` is False, dependencies are resolved only by parsing existing files (lockfiles and manifests).
+    If `resolve_untargeted_subprojects` is False, only subprojects with dependency source files or relevant code files
+    are resolved and the remaining subprojects are skipped. If `resolve_untargeted_subprojects` is True, this filtering
+    is disabled and resolution is attempted for every found subproject.
+    The list of rules is required in order to choose which subprojects to resolve and which can be skipped based
+    on the set of target reported by the `target_manager`.
 
     Returns a tuple with the following items:
         1. Unresolved subprojects
         2. Resolved subprojects, grouped by ecosystem
         4. Dependency source paths that were used in the resolution process
     """
-    # first, find all the subprojects
+    # first, find all the subprojects. We ignore the baseline handler because we want to _identify_, but not
+    # necessarily resolve, even unchanged subprojects.
     dependency_source_files = target_manager.get_all_dependency_source_files(
         ignore_baseline_handler=True
     )
     found_subprojects = find_subprojects(dependency_source_files, MATCHERS)
 
+    # A subproject is relevant if one of its dependency source files is a target or
+    # there exist a code target for which find_closest_subproject is that subproject.
+    if resolve_untargeted_subprojects:
+        relevant_subprojects = found_subprojects
+        irrelevant_subprojects: List[UnresolvedSubproject] = []
+    else:
+        relevant_subprojects, irrelevant_subprojects = filter_changed_subprojects(
+            target_manager, dependency_aware_rules, found_subprojects
+        )
+
     # targets that were considered in generating the dependency tree
     dependency_targets: List[Path] = []
 
     resolved: Dict[Ecosystem, List[ResolvedSubproject]] = {}
-    unresolved: List[UnresolvedSubproject] = []
+    unresolved: List[UnresolvedSubproject] = irrelevant_subprojects
     # Dispatch each subproject to a resolver for resolution
-    for to_resolve in found_subprojects:
-        ecosystem, deps, errors, targets = _resolve_dependency_source(
+    for to_resolve in relevant_subprojects:
+        if to_resolve.ecosystem is None:
+            # no reason to resolve subprojects that we don't support. We only recognize them
+            # for tracking purposes
+            unresolved.append(
+                UnresolvedSubproject.from_subproject(
+                    to_resolve, UnresolvedReason.UNSUPPORTED, []
+                )
+            )
+            continue
+        resolved_info, errors, targets = resolve_dependency_source(
             to_resolve.dependency_source,
             allow_dynamic_resolution,
-            prioritize_dependency_graph_generation,
+            ptt_enabled,
         )
         dependency_targets.extend(targets)
 
-        if ecosystem is not None:
-            # ecosystem is only None when dependency resolution failed in some way
+        if resolved_info is not None:
+            # resolved_info is only None when dependency resolution failed in some way
+            resolution_method, deps = resolved_info
             resolved_subproject = ResolvedSubproject.from_unresolved(
-                to_resolve, ResolutionMethod.LOCKFILE_PARSING, errors, deps, ecosystem
+                to_resolve, resolution_method, errors, deps, to_resolve.ecosystem
             )
 
-            if ecosystem not in resolved:
-                resolved[ecosystem] = []
-            resolved[ecosystem].append(resolved_subproject)
+            if resolved_subproject.ecosystem not in resolved:
+                resolved[resolved_subproject.ecosystem] = []
+            resolved[resolved_subproject.ecosystem].append(resolved_subproject)
         else:
             # we were not able to resolve the subproject, so track it as an unresolved subproject
-            unresolved.append(UnresolvedSubproject.from_subproject(to_resolve, errors))
+            unresolved.append(
+                UnresolvedSubproject.from_subproject(
+                    to_resolve, UnresolvedReason.FAILED, errors
+                )
+            )
 
     return unresolved, resolved, dependency_targets

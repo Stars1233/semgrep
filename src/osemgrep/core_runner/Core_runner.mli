@@ -23,11 +23,7 @@ type conf = {
 [@@deriving show]
 
 (* output *)
-type result = {
-  core : Semgrep_output_v1_t.core_output;
-  hrules : Rule.hrules;
-  scanned : Fpath.t Set_.t;
-}
+type result = Core_runner_result.t
 
 (* This type is similar to Core_scan.func, but taking a list of
  * rules and targets and a simpler conf type instead of the very
@@ -56,8 +52,8 @@ type pro_conf = {
 val default_conf : conf
 
 (* Semgrep Pro hook for osemgrep *)
-val hook_mk_pro_core_run_for_osemgrep : (pro_conf -> func) option ref
-val hook_pro_git_remote_scan_setup : (func -> func) option ref
+val hook_mk_pro_core_run_for_osemgrep : (pro_conf -> func) option Hook.t
+val hook_pro_git_remote_scan_setup : (func -> func) option Hook.t
 
 (* builder *)
 val mk_result : Rule.rule list -> Core_result.t -> result
@@ -77,10 +73,3 @@ val mk_core_run_for_osemgrep : Core_scan.func -> func
 
 (* Helper used also in Steps_scan.ml *)
 val core_scan_config_of_conf : conf -> Core_scan_config.t
-
-(* reused in semgrep-server in pro and for Git_remote.ml in pro *)
-val split_jobs_by_language :
-  Find_targets.conf -> Rule.t list -> Fpath.t list -> Lang_job.t list
-
-(* Helper used in Test_subcommand.ml *)
-val targets_for_files_and_rules : Fpath.t list -> Rule.t list -> Target.t list

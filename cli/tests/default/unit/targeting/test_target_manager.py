@@ -8,7 +8,7 @@ from typing import List
 
 import pytest
 
-from semgrep.error import FilesNotFoundError
+from semgrep.error import InvalidScanningRootError
 from semgrep.git import BaselineHandler
 from semgrep.ignores import FileIgnore
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
@@ -25,7 +25,7 @@ from semgrep.target_manager import TargetManager
 def test_nonexistent(tmp_path, monkeypatch):
     """
     Test that initializing TargetManager with targets that do not exist
-    raises FilesNotFoundError
+    raises InvalidScanningRootError
     """
     foo = tmp_path / "foo"
     foo.mkdir()
@@ -37,7 +37,7 @@ def test_nonexistent(tmp_path, monkeypatch):
     # shouldnt raise an error
     TargetManager(["foo/a.py"])
 
-    with pytest.raises(FilesNotFoundError) as e:
+    with pytest.raises(InvalidScanningRootError) as e:
         TargetManager(["foo/a.py", "foo/doesntexist.py"])
     assert e.value.paths == (Path("foo/doesntexist.py"),)
 
@@ -178,7 +178,7 @@ def test_get_files_for_language(
         targets = [str(Path(target).resolve()) for target in targets]
 
     if expected is None:
-        with pytest.raises(FilesNotFoundError):
+        with pytest.raises(InvalidScanningRootError):
             target_manager = paths.TargetManager(targets)
         return
     else:
@@ -205,7 +205,7 @@ def test_skip_symlink(tmp_path, monkeypatch):
         {foo / "a.py"},
     )
 
-    with pytest.raises(FilesNotFoundError):
+    with pytest.raises(InvalidScanningRootError):
         TargetManager([str(foo / "link.py")]).get_files_for_language(PY, SAST_PRODUCT)
 
 
@@ -346,6 +346,24 @@ def test_ignores(tmp_path, monkeypatch):
     dir3_a = dir3 / "a.py"
     dir3_a.touch()
 
+    # Create /dir4/dir/a.py
+    dir4 = tmp_path / "dir4"
+    dir4.mkdir()
+    dir4_dir = dir4 / "dir"
+    dir4_dir.mkdir()
+    dir4_dir_a = dir4_dir / "a.py"
+    dir4_dir_a.touch()
+
+    # Create /dir5/dir4/dir/a.py
+    dir5 = tmp_path / "dir5"
+    dir5.mkdir()
+    dir5_dir4 = dir5 / "dir4"
+    dir5_dir4.mkdir()
+    dir5_dir4_dir = dir5_dir4 / "dir"
+    dir5_dir4_dir.mkdir()
+    dir5_dir4_dir_a = dir5_dir4_dir / "a.py"
+    dir5_dir4_dir_a.touch()
+
     # Ignore nothing
     files = ignore([])
     assert a in files
@@ -361,10 +379,21 @@ def test_ignores(tmp_path, monkeypatch):
     assert dir_b not in files
     assert dir_c not in files
     assert dir3_a not in files
+    assert dir4_dir_a not in files
 
     # Ignore root file
     files = ignore(["/a.py"])
     assert dir3_a in files
+
+    # Ignore anchored directory (not subdirectories)
+    files = ignore(["/dir"])
+    assert dir_a not in files
+    assert dir4_dir_a in files
+
+    # Ignore another kind of anchored directory (not subdirectories)
+    files = ignore(["dir4/dir"])
+    assert dir4_dir_a not in files
+    assert dir5_dir4_dir_a in files
 
     # Ignore root file that does not exist
     files = ignore(["/b.py"])
@@ -378,7 +407,7 @@ def test_ignores(tmp_path, monkeypatch):
     files = ignore(["dir3/"])
     assert dir3_a not in files
 
-    # Ingore nested double star
+    # Ignore nested double star
     files = ignore(["**/dir2/dir3/"])
     assert dir3_a not in files
 

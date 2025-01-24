@@ -31,18 +31,22 @@ val files_of_dirs_or_files_no_vcs_nofilter : Fpath.t list -> Fpath.t list
 *)
 val cat : Fpath.t -> string list
 
-(* this is 1-based access, line 1 is at res.[1] *)
+(* this is 1-based access, line 1 is at res.[1]
+ * (res.[0] is a fake empty string)
+ *)
 val cat_array : Fpath.t -> string array
 val write_file : file:Fpath.t -> string -> unit
 
 (* [lines_of_file (start_line, end_line) file] returns
- * the list of lines from start_line to end_line included.
+ * the list of lines from start_line to end_line included
+ * or an error message (for example in case of out of bounds access).
  *
  * Note that the returned lines do not contain \n.
+ * Note also that line numbers are 1-based.
  *
  * This function is slow, you should not use it!
  *)
-val lines_of_file : int * int -> Fpath.t -> string list
+val lines_of_file : int * int -> Fpath.t -> (string list, string) result
 
 (* Read the contents of file.
 
@@ -84,20 +88,52 @@ val find_first_match_with_whole_line :
 (*****************************************************************************)
 (* File properties *)
 (*****************************************************************************)
+
+(* Check if the file is executable by others or by the group.
+   If the file is only executable by the user owning the file ('u'),
+   this function reports it as not executable.
+   For example, the following commands create a file that's executable by its
+   owner (and by root) on which is_executable fails:
+
+     echo > foo
+     chmod 700 foo
+     ./foo && echo 'success'
+
+   TODO: is this intentional? Please explain.
+*)
 val is_executable : Fpath.t -> bool
 val filesize : Fpath.t -> int
 val filemtime : Fpath.t -> float
 
-(* raise Unix_error if the directory does not exist *)
-val is_directory : Fpath.t -> bool
+(*
+   Functions for testing whether a file exists and is of the expected kind,
+   without raising exceptions.
 
-(* raise Unix_error if the file does not exist *)
-val is_file : Fpath.t -> bool
-val is_symlink : Fpath.t -> bool
-val lfile_exists : Fpath.t -> bool
+   The goal is to deal with the 3 common file types (dir, reg, lnk)
+   and focus only on files that are usable. If a file is not usable
+   due for example to missing permissions, all these functions will return a
+   negative answer ('false') rather than raising an exception.
+   A design principle is "make common tasks easy and uncommon tasks possible".
+   Here, we're focusing on the former.
 
-(* no raised Unix_error if the directory does not exist *)
-val dir_exists : Fpath.t -> bool
+   dir = directory = folder
+   reg = regular files
+   lnk = symbolic link
+
+   The functions whose name contains 'lnk' never follow symlinks.
+
+   For more exotic file kinds or for classifying files by kind,
+   use UUnix.stat or UUnix.lstat directly.
+*)
+val is_dir : follow_symlinks:bool -> Fpath.t -> bool
+val is_reg : follow_symlinks:bool -> Fpath.t -> bool
+val is_lnk : Fpath.t -> bool
+val is_dir_or_reg : follow_symlinks:bool -> Fpath.t -> bool
+val is_dir_or_lnk : Fpath.t -> bool
+val is_lnk_or_reg : Fpath.t -> bool
+val is_dir_or_lnk_or_reg : Fpath.t -> bool
+
+(* Turn a file kind into a JSON string node and vice-versa *)
 val file_kind_to_yojson : Unix.file_kind -> Yojson.Safe.t
 val file_kind_of_yojson : Yojson.Safe.t -> (Unix.file_kind, string) result
 

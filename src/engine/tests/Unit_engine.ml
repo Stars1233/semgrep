@@ -2,9 +2,9 @@ open Common
 open Fpath_.Operators
 module R = Rule
 module MR = Mini_rule
-module P = Pattern_match
+module PM = Core_match
 module E = Core_error
-module OutJ = Semgrep_output_v1_t
+module Out = Semgrep_output_v1_t
 module TCM = Test_compare_matches
 
 let t = Testo.create
@@ -139,7 +139,7 @@ let experimental_features =
     "dots_string";
     "metavar_arg";
     "metavar_call";
-    "metavar_equality_var" (* TODO: add dots_params? *);
+    "metavar_equality_var";
   ]
 
 let beta_features =
@@ -159,6 +159,7 @@ let ga_features =
   @ [
       "deep_expr_operator";
       "dots_method_chaining";
+      "dots_params";
       "equivalence_constant_propagation";
       "equivalence_naming_import";
       "metavar_anno";
@@ -187,7 +188,8 @@ let language_exceptions =
     (* GA languages *)
 
     (* TODO: why not regexp_string? NA for naming_import? *)
-    (Lang.Csharp, [ "equivalence_naming_import"; "regexp_string" ]);
+    ( Lang.Csharp,
+      [ "equivalence_naming_import"; "regexp_string"; "dots_params" ] );
     (* TODO: metavar_anno sounds like an NA, but the other?? *)
     (Lang.Go, [ "metavar_class_def"; "metavar_import"; "metavar_anno" ]);
     (* TODO: NA for Java? *)
@@ -202,13 +204,24 @@ let language_exceptions =
         "metavar_class_def";
       ] );
     ( Lang.Php,
-      [ "equivalence_naming_import"; "metavar_key_value"; "metavar_typed" ] );
+      [
+        "equivalence_naming_import";
+        "metavar_key_value";
+        "metavar_typed";
+        "dots_params";
+      ] );
     (* good boy, metavar_typed is working just for constants though *)
     (Lang.Python, []);
     (* metavar_typed is NA (dynamic language), metavar_anno also NA? *)
-    (Lang.Ruby, [ "equivalence_naming_import"; "metavar_typed"; "metavar_anno" ]);
+    ( Lang.Ruby,
+      [
+        "equivalence_naming_import";
+        "metavar_typed";
+        "metavar_anno";
+        "dots_params";
+      ] );
     (* regexp_string feature has been deprecated *)
-    (Lang.Scala, [ "regexp_string"; "metavar_ellipsis_args" ]);
+    (Lang.Scala, [ "regexp_string"; "metavar_ellipsis_args"; "dots_params" ]);
     (* Beta languages *)
 
     (* TODO: to fix *)
@@ -613,7 +626,7 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
     rules
     |> List.filter (fun r ->
            match r.Rule.target_analyzer with
-           | Xlang.L (x, xs) -> List.mem lang (x :: xs)
+           | Analyzer.L (x, xs) -> List.mem lang (x :: xs)
            | _ -> false)
   in
   let search_rules, taint_rules, extract_rules, join_rules =
@@ -630,13 +643,13 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
            let xtarget : Xtarget.t =
              {
                path = { origin = File file; internal_path_to_content = file };
-               xlang = Xlang.L (lang, []);
+               analyzer = Analyzer.L (lang, []);
                lazy_content = lazy (UFile.read_file file);
                lazy_ast_and_errors = lazy (ast, []);
              }
            in
            let results =
-             Match_tainting_mode.check_rules ~match_hook:Fun.id
+             Match_tainting_mode.check_rules ~matches_hook:Fun.id
                ~per_rule_boilerplate_fn:(fun _rule f -> f ())
                [ rule ] xconf xtarget
            in
@@ -652,11 +665,11 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
   in
   let actual =
     matches
-    |> List_.map (fun (m : P.t) ->
+    |> List_.map (fun (m : PM.t) ->
            E.
              {
                rule_id = Some m.rule_id.id;
-               typ = OutJ.SemgrepMatchFound;
+               typ = Out.SemgrepMatchFound;
                loc = Some (fst m.range_loc);
                msg = m.rule_id.message;
                details = None;
